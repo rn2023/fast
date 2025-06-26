@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import asyncio
 import os
-from typing import Dict, List, Optional
+from typing import List, Optional
 from agents import Agent, Runner, handoff
 
 app = FastAPI(title="Interview Agent API", version="1.0.0")
@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://duke.yul1.qualtrics.com"],  # For production, restrict this to your domain
+    allow_origins=["https://duke.yul1.qualtrics.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -21,17 +21,11 @@ app.add_middleware(
 # Request/Response models
 class InterviewRequest(BaseModel):
     message: str
-    session_id: Optional[str] = "default"
-    reset_session: Optional[bool] = False
+    conversation_history: Optional[List[dict]] = []
 
 class InterviewResponse(BaseModel):
     reply: str
-    session_id: str
-    turn_count: int
     end_signal: Optional[str] = None
-
-# Store conversation sessions in memory (in production, use Redis or database)
-conversation_sessions: Dict[str, Dict] = {}
 
 # --- Agents ---
 transition_agent = Agent(
@@ -44,7 +38,7 @@ transition_agent = Agent(
         "Otherwise, provide guidance on how to continue the interview."
     ),
     model="gpt-4o",
-    handoffs=[]  # Will be set after all agents are defined
+    handoffs=[]
 )
 
 summary_agent = Agent(
@@ -114,54 +108,29 @@ transition_agent = Agent(
     ]
 )
 
-def get_or_create_session(session_id: str) -> Dict:
-    """Get existing session or create new one"""
-    if session_id not in conversation_sessions:
-        conversation_sessions[session_id] = {
-            "history": [],
-            "turn_count": 0,
-            "started": False
-        }
-    return conversation_sessions[session_id]
-
-def format_conversation_history(history: List[Dict]) -> str:
+def format_conversation_history(history: List[dict]) -> str:
     """Format conversation history as a string"""
     return "\n".join(f"{msg['role'].capitalize()}: {msg['content']}" for msg in history)
 
 @app.post("/chat", response_model=InterviewResponse)
 async def chat_endpoint(request: InterviewRequest):
     try:
-        # Get or create session
-        session = get_or_create_session(request.session_id)
-        
-        # Reset session if requested
-        if request.reset_session:
-            session["history"] = []
-            session["turn_count"] = 0
-            session["started"] = False
-        
-        # If this is the start of the interview, generate opening question
-        if not session["started"] and request.message.lower() in ["hello", "hi", "start", "begin"]:
-            session["started"] = True
+        # If this is the start of the interview (no history and greeting message)
+        if not request.conversation_history and request.message.lower() in ["hello", "hi", "start", "begin"]:
             opening_prompt = "Start the interview by asking an engaging opening question. Choose a topic that would be interesting to explore and ask the user about their thoughts, experiences, or perspective on it."
             result = await Runner.run(interview_agent, opening_prompt)
             
             response_content = result.final_output
-            session["history"].append({"role": "assistant", "content": response_content})
-            session["turn_count"] += 1
             
             return InterviewResponse(
                 reply=response_content,
-                session_id=request.session_id,
-                turn_count=session["turn_count"]
+                end_signal=None
             )
         
-        # Add user message to history
-        session["history"].append({"role": "user", "content": request.message})
-        session["turn_count"] += 1
-        
-        # Format conversation history
-        convo_history = format_conversation_history(session["history"])
+        # Format conversation history if it exists
+        convo_history = ""
+        if request.conversation_history:
+            convo_history = format_conversation_history(request.conversation_history)
         
         # Guardrail check
         guardrail_input = f"Conversation:\n{convo_history}\n\nLatest input: {request.message}"
@@ -170,13 +139,12 @@ async def chat_endpoint(request: InterviewRequest):
         if "flag" in guardrail_result.final_output.lower():
             return InterviewResponse(
                 reply=f"I appreciate your input, but let's keep our conversation focused on the interview topic. {guardrail_result.final_output}",
-                session_id=request.session_id,
-                turn_count=session["turn_count"]
+                end_signal=None
             )
         
         # Context agent rewrites input if there's conversation history
         final_input = request.message
-        if len(session["history"]) > 1:
+        if request.conversation_history:
             context_prompt = (
                 f"Conversation history:\n{convo_history}\n\n"
                 f"User's new message: {request.message}\n\n"
@@ -196,10 +164,6 @@ async def chat_endpoint(request: InterviewRequest):
         result = await Runner.run(interview_agent, agent_input)
         response_content = result.final_output
         
-        # Add assistant response to history
-        session["history"].append({"role": "assistant", "content": response_content})
-        session["turn_count"] += 1
-        
         # Check if interview should end
         end_signal = None
         if "CONCLUDE_INTERVIEW" in response_content:
@@ -207,8 +171,6 @@ async def chat_endpoint(request: InterviewRequest):
         
         return InterviewResponse(
             reply=response_content,
-            session_id=request.session_id,
-            turn_count=session["turn_count"],
             end_signal=end_signal
         )
         
@@ -218,28 +180,6 @@ async def chat_endpoint(request: InterviewRequest):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "Interview Agent API is running"}
-
-@app.delete("/session/{session_id}")
-async def clear_session(session_id: str):
-    """Clear a specific session"""
-    if session_id in conversation_sessions:
-        del conversation_sessions[session_id]
-        return {"message": f"Session {session_id} cleared"}
-    return {"message": f"Session {session_id} not found"}
-
-@app.get("/session/{session_id}")
-async def get_session(session_id: str):
-    """Get session info"""
-    session = conversation_sessions.get(session_id)
-    if not session:
-        return {"message": "Session not found"}
-    
-    return {
-        "session_id": session_id,
-        "turn_count": session["turn_count"],
-        "started": session["started"],
-        "history_length": len(session["history"])
-    }
 
 if __name__ == "__main__":
     import uvicorn
