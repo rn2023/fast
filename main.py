@@ -13,7 +13,7 @@ from agents import Agent, Runner, handoff
 from agents.run_context import RunContextWrapper
 from agents.mcp import create_static_tool_filter
 
-# Configure logging
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class OptimizedMCPManager:
         self._cleanup_task = None
         self._server_configs = {}
         
-        # Start cleanup task
+        
         self._start_cleanup_task()
     
     def _start_cleanup_task(self):
@@ -54,7 +54,7 @@ class OptimizedMCPManager:
         async def cleanup_expired_sessions():
             while True:
                 try:
-                    await asyncio.sleep(300)  # Check every 5 minutes
+                    await asyncio.sleep(300)
                     await self._cleanup_expired_sessions()
                 except Exception as e:
                     logger.error(f"Error in cleanup task: {e}")
@@ -93,7 +93,7 @@ class OptimizedMCPManager:
         tool_filter_config = config.get('tool_filter')
         cache_tools = config.get('cache_tools', True)
         
-        # Create tool filter if specified
+
         tool_filter = None
         if tool_filter_config:
             if tool_filter_config.get('type') == 'static':
@@ -104,7 +104,6 @@ class OptimizedMCPManager:
             elif tool_filter_config.get('type') == 'dynamic':
                 tool_filter = tool_filter_config.get('function')
         
-        # Create server based on type
         if server_type == 'stdio':
             server = MCPServerStdio(
                 params=params,
@@ -132,7 +131,6 @@ class OptimizedMCPManager:
         """Create a new user session with optimized MCP servers."""
         session_id = str(uuid.uuid4())
         
-        # Create MCP servers for this session if configs provided
         mcp_servers = []
         if server_configs:
             for config_name in server_configs:
@@ -143,7 +141,6 @@ class OptimizedMCPManager:
                 server = await self.create_optimized_server(config)
                 mcp_servers.append(server)
         
-        # Create session
         session = UserSession(
             session_id=session_id,
             user_id=user_id,
@@ -166,7 +163,6 @@ class OptimizedMCPManager:
             session.update_access_time()
             return session
         elif session:
-            # Session expired, clean it up
             await self._close_session_resources(session)
             del self.sessions[session_id]
         return None
@@ -184,20 +180,22 @@ class OptimizedMCPManager:
                 "Otherwise, provide guidance on how to continue exploring their political views and correlations."
             ),
             model="gpt-4o",
-            mcp_servers=mcp_servers,
-            handoffs=[]
+            mcp_servers=mcp_servers
         )
 
         summary_agent = Agent(
             name="Summary Agent", 
-            instructions="Summarize the user's political views, key positions, and the correlations between different political issues they discussed. Provide a clear, comprehensive summary of their political beliefs and how they connect their various positions.",
+            instructions=("Summarize the user's political views, key positions, and the correlations between different political ideologiges and issue stances they discussed. Provide a clear, comprehensive summary of their political beliefs and how they connect their various positions."
+                          ""
+                          )
+            ,
             model="gpt-4o",
             mcp_servers=mcp_servers
         )
 
         final_question_agent = Agent(
             name="Final Question Agent",
-            instructions="Ask one final thoughtful question about their political views to help them reflect on their overall political philosophy or how their beliefs have evolved. Make it open-ended and deeply introspective about their political journey.",
+            instructions="Ask one final thoughtful question about their political views to help them reflect on their overall political ideology or how their beliefs fall into the traditional 2 party ideology system. Make it open-ended and deeply introspective about their political stances.",
             model="gpt-4o",
             mcp_servers=mcp_servers
         )
@@ -205,8 +203,11 @@ class OptimizedMCPManager:
         end_interview_agent = Agent(
             name="End Interview Agent", 
             instructions=(
+                "If the interview comes to a natural conclusion, or if the user indicates they are done, please conclude the interview."
+                "If the interviewer is inappropriate or has gone off track more than 3 times in the interview, gently steer them back to the purpose of understanding the user's political views. After warning, conclude the interview."
+                "If the interviewee expresses the desire to end the interview, respect their wishes and conclude."
                 "Provide a thoughtful conclusion to the political interview. Thank them for sharing their political views and offer any final reflections on the complexity of political beliefs. "
-                "Always end your response with 'CONCLUDE_INTERVIEW' to signal the interview is complete."
+                "ANYTIME TO END THE INTERVIEW, Always end your response with 'CONCLUDE_INTERVIEW' to signal the interview is complete."
             ),
             model="gpt-4o",
             mcp_servers=mcp_servers
@@ -221,27 +222,39 @@ class OptimizedMCPManager:
 
         context_agent = Agent(
             name="Context Agent",
-            instructions="Given a political conversation history and a new user message, rewrite the message with useful context from the previous political discussion. Output only the rewritten message, making it clearer and more specific based on the political topics that have been discussed.",
+            instructions=("Given a political conversation history and a new user message, rewrite the message with useful context from the previous political discussion. Output only the rewritten message, making it clearer and more specific based on the political topics that have been discussed."
+            ""),
             model="gpt-4o",
-            mcp_servers=mcp_servers
+            mcp_servers=mcp_servers,
         )
 
         interview_agent = Agent(
             name="Political Interview Agent",
             instructions=(
-                "You are conducting a thoughtful interview about political views and beliefs. Your goal is to deeply understand their political perspectives and the connections between their various positions. "
+                "You are conducting a thoughtful interview about political ideologies and the partcipants stances on various politcal issues. Your goal is to deeply understand their poltical ideology, especially those of politcal moderates by questioning them on their issue stances. "
                 "ALWAYS lead with questions - never wait for the user to start. "
-                "Start by asking what political issues they are most passionate about and why those issues matter to them personally. "
-                "Once they share their passionate issues, dive deep into the underlying reasons and values that drive these beliefs. "
-                "Explore correlations between different political positions - ask how their views on one issue relate to their views on others. "
-                "Ask about the personal experiences, values, or principles that shaped their political beliefs. "
-                "Probe into how they see connections between seemingly different political topics. "
-                "Explore potential tensions or consistencies in their political worldview. "
-                "Ask about how they prioritize different political issues when they might conflict. "
-                "Guide the conversation to understand the deeper philosophical or moral foundations of their political views. "
+                "Start the interview by introducing yourself as a curious political interviewer interested in understanding their political issue stances and ideologies as well as the issues that they care most about that infrom their political ideology classification"
+                "Move on to by asking why they identify with a specific ideology or as a political moderate and what political issues contribute to that identity. Say that we want to explore multiple political issues to understand their views better. "
+                "Dig into the issues that they believe in most strongly impact their political party and ideology and what those issues and their solutions are. "
+                "Once they share their passionate issues, dive deep into if they are moderates due to varying issue stance that align with a both parties or moderate stances on most or all issues. "
+                "Conduct this interview in a curious, non-judgmental manner - your goal is to understand their political views, not to debate or challenge them. "
+                "The interview should focus on the exploring the correlation between their stances on poltical issues and the political ideology they identify with. "
+                "You should ask follow-up questions to dig deeper into their reasoning and the values that underpin their political beliefs. "
+                "The questions should be concise yet thought-provoking, aiming to uncover the nuances of their political ideology with short and understadnable language. "
+                "Try to avoid yes/no questions and tackle one issue at a time to fully explore their views. MAKE THE INTERVIEW SIMPLE FOR THE INTEVRIEWEE TO UNDERSTAND. ONE QUESTION AT A TIME! "
+                "ASK ONLY ONE SIMPLE QUESTION AT A TIME"
+                "After the first couple questions, start to explore their views on different but specific political issues and what that reveals about their overall political ideology. "
+                "Handoff to the transition agent when you feel that a politcla issue stance hs been fully explored or when you think the interview is ready to move towards summary or conclusion. "
+                "Explore potential tensions or consistencies in their political worldview especially when it comes to issues that break with their political ideologies. Make the questions simple and easy to understand. "
+                "Ask about how they prioritize different political issues when they might conflict with the stances of the party or ideology that they most align with. "
+                "Guide the conversation to understand the true nature of their poltical stance as a moderate - is it a mix of issue stances, a centrist approach, or something else? "
                 "Remain neutral and curious - your goal is understanding, not debating or challenging. "
-                "After 5-7 substantial exchanges about their political views, consider handing off to the transition agents. "
+                "After 4-6 substantial exchanges about their political views, consider handing off to the transition agents. "
                 "Always end your responses with a question unless concluding the interview."
+                "Make the total interview around 15 questions to get a deep understanding of their political views."
+                "Consdier handing off to summary_agent, final_question_agent, or end_interview_agent when appropriate."
+                "Make sure to look over the entire political conversation history to inform your questions and responses. This can be done with a handoff to the context_agent"
+                "After 15-20 questions, consider handing off to end_interview_agent to conclude the interview."
             ),
             model="gpt-4o",
             mcp_servers=mcp_servers,
@@ -253,7 +266,6 @@ class OptimizedMCPManager:
             ]
         )
 
-        # Update transition agent handoffs
         transition_agent = Agent(
             name="Transition Agent",
             instructions=transition_agent.instructions,
@@ -282,7 +294,6 @@ class OptimizedMCPManager:
         if not session:
             return False
         
-        # Create agents with MCP servers
         session.agents = self.create_agents_with_mcp(session.mcp_servers)
         return True
     
@@ -303,10 +314,10 @@ class OptimizedMCPManager:
         
         self.sessions.clear()
 
-# Global MCP manager
+
 mcp_manager: Optional[OptimizedMCPManager] = None
 
-# Pydantic models
+
 class SessionCreateRequest(BaseModel):
     user_id: Optional[str] = None
     server_configs: Optional[List[str]] = []
@@ -325,17 +336,14 @@ class InterviewResponse(BaseModel):
     session_id: str
     end_signal: Optional[str] = None
 
-# Startup and shutdown events
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
     global mcp_manager
     
-    # Startup
-    mcp_manager = OptimizedMCPManager(session_timeout_minutes=60)  # 2 hour sessions
-    
-    # Register example MCP server configurations
-    # You can add your own MCP servers here
+
+    mcp_manager = OptimizedMCPManager(session_timeout_minutes=60) 
     mcp_manager.register_server_config('research_tools', {
         'type': 'stdio',
         'params': {
@@ -350,7 +358,6 @@ async def lifespan(app: FastAPI):
         'cache_tools': True
     })
     
-    # Custom filter for political content analysis
     def political_content_filter(context, tool) -> bool:
         """Allow tools that help with political content analysis."""
         allowed_tools = [
@@ -376,12 +383,10 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Shutdown
     if mcp_manager:
         await mcp_manager.close()
         logger.info("MCP Manager closed")
 
-# Create FastAPI app with lifespan
 app = FastAPI(
     title="Political Views Interview Agent API with MCP", 
     version="2.0.0",
@@ -411,16 +416,16 @@ async def get_or_create_session(session_id: Optional[str] = None, user_id: Optio
         else:
             raise HTTPException(status_code=404, detail="Session not found or expired")
     
-    # Create new session
+
     if not user_id:
         user_id = f"user_{uuid.uuid4().hex[:8]}"
     
     new_session_id = await mcp_manager.create_session(
         user_id=user_id,
-        server_configs=[]  # Can be extended to include MCP servers
+        server_configs=[]
     )
     
-    # Setup agents for the session
+
     await mcp_manager.setup_session_agents(new_session_id)
     
     session = await mcp_manager.get_session(new_session_id)
@@ -440,7 +445,7 @@ async def create_session(request: SessionCreateRequest):
             server_configs=request.server_configs or []
         )
         
-        # Setup agents for the session
+
         await mcp_manager.setup_session_agents(session_id)
         
         return SessionCreateResponse(
@@ -455,23 +460,23 @@ async def create_session(request: SessionCreateRequest):
 async def chat_endpoint(request: InterviewRequest):
     """Main chat endpoint with session management."""
     try:
-        # Get or create session
+        
         session = await get_or_create_session(request.session_id)
         
-        # Use session conversation history if not provided in request
+       
         if not request.conversation_history and session.conversation_history:
             conversation_history = session.conversation_history
         else:
             conversation_history = request.conversation_history or []
         
-        # Handle opening message
+        
         if not conversation_history and request.message.lower() in ["hello", "hi", "start", "begin"]:
-            opening_prompt = "Start the political interview by asking what political issues they are most passionate about and why those issues matter to them personally. Be warm and curious in your approach."
+            opening_prompt = "Start the political interview by asking what their political party and ideology is whether more liberal, moderate, or conservative and what issues they are most passionate about that informs their ideology. Be warm and curious in your approach."
             result = await Runner.run(session.agents['interview_agent'], opening_prompt)
             
             response_content = result.final_output
             
-            # Update session conversation history
+            
             session.conversation_history.append({"role": "user", "content": request.message})
             session.conversation_history.append({"role": "assistant", "content": response_content})
             
@@ -481,19 +486,19 @@ async def chat_endpoint(request: InterviewRequest):
                 end_signal=None
             )
         
-        # Format conversation history
+        
         convo_history = ""
         if conversation_history:
             convo_history = format_conversation_history(conversation_history)
         
-        # Run guardrail check
+        
         guardrail_input = f"Political conversation:\n{convo_history}\n\nLatest input: {request.message}"
         guardrail_result = await Runner.run(session.agents['guardrail_agent'], guardrail_input)
         
         if "flag" in guardrail_result.final_output.lower():
             response_content = f"I appreciate your input, but let's keep our political discussion respectful and focused on understanding your views. {guardrail_result.final_output}"
             
-            # Update session conversation history
+            
             session.conversation_history.append({"role": "user", "content": request.message})
             session.conversation_history.append({"role": "assistant", "content": response_content})
             
@@ -503,7 +508,7 @@ async def chat_endpoint(request: InterviewRequest):
                 end_signal=None
             )
         
-        # Process message with context if needed
+        
         final_input = request.message
         if conversation_history:
             context_prompt = (
@@ -514,7 +519,7 @@ async def chat_endpoint(request: InterviewRequest):
             context_result = await Runner.run(session.agents['context_agent'], context_prompt)
             final_input = context_result.final_output
         
-        # Run main interview agent
+        
         agent_input = (
             f"Political conversation so far:\n{convo_history}\n\n"
             f"User's latest response: {final_input}\n\n"
@@ -526,12 +531,11 @@ async def chat_endpoint(request: InterviewRequest):
         result = await Runner.run(session.agents['interview_agent'], agent_input)
         response_content = result.final_output
         
-        # Check for end signal
+        
         end_signal = None
         if "CONCLUDE_INTERVIEW" in response_content:
             end_signal = "conclude"
         
-        # Update session conversation history
         session.conversation_history.append({"role": "user", "content": request.message})
         session.conversation_history.append({"role": "assistant", "content": response_content})
         
