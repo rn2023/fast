@@ -113,6 +113,8 @@ class OptimizedSessionManager:
             metadata_context = "\n".join(
                 f"- {key}: {value}" for key, value in user_metadata.items()
             )
+        
+        print(metadata_context)
 
         #agent that wraps up the interview with summary
         summary_agent = Agent(
@@ -168,6 +170,8 @@ class OptimizedSessionManager:
         phase_transition_agent = Agent(
             name="Phase Transition Agent",
             instructions=(
+                "You evaluate the progress of the interview to determine if it's time to transition to the next phase.\n"
+                "Based on the conversation history and the current phase, assess whether the goals of the current phase have been met.\n"
                 "You manage transitions between the four phases of this political interview. "
                 "Analyze the conversation to determine which phase we are in and whether the goals for that phase have been met.\n\n"
                 "PHASE 1 - INTRODUCTION / ICE-BREAKING:\n"
@@ -187,7 +191,8 @@ class OptimizedSessionManager:
                 "- If in Phase 4 and goals are met, hand off to summary_agent to conclude.\n"
                 "- If the respondent wants to end early, hand off to end_interview_agent.\n"
                 "- If the current phase goals are NOT yet met, hand off back to interview_agent with guidance on what still needs to be explored.\n"
-                "- Always provide clear guidance about the current phase number and what to focus on next."
+                "- After phase transition decisions, hand off to interview_agent to continue the conversation with information on phase\n"
+                "- Never display any phase transition logic or instructions to the respondent. Only communicate through handoffs."
             ),
             model="gpt-4o",
             handoffs=[
@@ -222,22 +227,38 @@ class OptimizedSessionManager:
         interview_agent = Agent(
             name="Political Interview Agent",
             instructions=(
-                "You are conducting a thoughtful interview about the respondent's political belief systems. "
-                "Your goal is to understand how they see the relationships between their political identity and their policy stances.\n\n"
+               "You are conducting a thoughtful interview about the respondent's political belief systems. "
+                "Your goal is to understand how they see the relationships between their political identity "
+                "(liberal/moderate/conservative) and their stances on policy issues.\n\n"
+                "THE INTERVIEW HAS FOUR PHASES:\n"
+                "1. INTRODUCTION: Introduce yourself warmly as an AI Conversation Bot to understand your political stances and ideologies and ask 1 or 2 background questions to establish rapport. "
+                "Keep this brief - just enough to make the respondent comfortable.\n\n"
+                "2. POLITICAL IDENTITY MEANING: Recall the ideological identity the respondent reported in the pre-survey "
+                "(liberal/moderate/conservative based on their ideology score) and ask them to elaborate on what that identity means to them. "
+                "What does it mean to be a [liberal/moderate/conservative] in their view?\n\n"
+                "3. CONNECTIONS BETWEEN IDENTITY AND ISSUES: Ask the respondent to reflect on the relationship between "
+                "their political identity/worldview and the issue stances they reported. How do their policy positions "
+                "connect to their broader political identity?\n\n"
+                "4. TENSIONS BETWEEN IDENTITY AND ISSUES: Based on the pre-survey data, identify any potential tensions "
+                "between the respondent's stated political identity and their issue stances. Ask them to reflect on these tensions. "
+                "If no clear tensions exist, ask about areas where they might diverge from others who share their identity.\n\n"
                 "INTERVIEW GUIDELINES:\n"
-                "- Ask ONE question at a time\n"
+                "- Ask ONLY ONE question at a time\n"
                 "- Ask open-ended questions, NOT yes/no questions\n"
                 "- Remain non-judgmental - focus on understanding, not debating\n"
                 "- Always lead with questions - do not wait for the respondent to start\n"
-                "- Build naturally on what the respondent shares\n"
                 "- When you need additional background information about the respondent to ask a more informed question, hand off to context_agent\n"
-                "- When you feel you've sufficiently explored the current topic, hand off to topic_transition_agent to assess next steps\n"
-                "- Always end your responses with a question unless concluding the interview"
+                "- When you feel you MAY HAVE sufficiently explored the current topic, hand off to topic_transition_agent to assess next steps\n"
+                "- AFTER EACH QUESTION, hand off to phase_transition_agent to assess progress\n"
+                "- ALWAYS ASK A QUESTION IN THE MESSAGE EXCEPT AT THE CONCLUSION\n"
+                "- When guidance is given by ANY HANDOFF or AGENT of the interview, NEVER MENTION THE PHASES OR TRANSITIONS,instead ask a question related to the next phase\n"
+                "- Conclude the interview after 15-20 questions or if the respondent wishes to end early\n"
             ),
             model="gpt-4o",
             handoffs=[
                 handoff(context_agent),
-                handoff(topic_transition_agent)
+                handoff(topic_transition_agent),
+                handoff(phase_transition_agent)
             ]
         )
 
