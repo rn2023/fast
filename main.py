@@ -236,7 +236,7 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         THE INTERVIEW HAS FOUR PHASES:
 
         Phase 1 — Introduction: Open by asking the respondent about their overall thoughts and feelings
-        toward politics and which issues matter most to them. Keep this brief — 1 to 2 exchanges —
+        toward politics. Keep this brief — 1 to 2 exchanges —
         before moving on.
 
         Phase 2 — Political Identity Meaning: Using their ideology score from the pre-survey, ask them
@@ -371,8 +371,7 @@ async def chat_endpoint(request: InterviewRequest):
 
         agent_input = f"""Begin the interview in Phase 1 (Introduction). Introduce yourself warmly as
         an AI Conversation Bot here to learn about the respondent's political views and beliefs. Your
-        opening question should ask about their overall thoughts and feelings toward politics and which
-        political issues matter most to them. Ask only this ONE open-ended question to open the
+        opening question should ask about their overall thoughts and feelings toward politics. Ask only this ONE open-ended question to open the
         conversation.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
