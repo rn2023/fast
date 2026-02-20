@@ -1,308 +1,21 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import asyncio
+from contextlib import asynccontextmanager
+from typing import List, Optional, Dict, Any
+import logging
 import os
 import uuid
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
-import logging
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+import json
+import sqlite3
 
-from agents import Agent, Runner, handoff
-
+from agents import Agent, Runner, handoff, SQLiteSession, RunContextWrapper
+from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@dataclass
-class UserSession:
-    #holds session data for each user
-    session_id: str
-    user_id: str
-    created_at: datetime
-    last_accessed: datetime
-    agents: Dict[str, Agent]
-    conversation_history: List[dict]
-    user_metadata: Dict[str, Any] = field(default_factory=dict)
-    interview_phase: int = 1
-    phase_exchange_count: int = 0 
-
-    def is_expired(self, timeout_minutes: int = 60) -> bool:
-        #checks if session timed out
-        return datetime.now() - self.last_accessed > timedelta(minutes=timeout_minutes)
-
-    def update_access_time(self):
-        #bumps the last accessed timestamp
-        self.last_accessed = datetime.now()
-
-class OptimizedSessionManager:
-    #manages all active user sessions
-
-    def __init__(self, session_timeout_minutes: int = 60):
-        self.sessions: Dict[str, UserSession] = {}
-        self.session_timeout_minutes = session_timeout_minutes
-        self._cleanup_task = None
-
-        self._start_cleanup_task()
-
-    def _start_cleanup_task(self):
-        #spins up background task to clean old sessions
-        async def cleanup_expired_sessions():
-            while True:
-                try:
-                    await asyncio.sleep(300)  #check every 5 minutes
-                    await self._cleanup_expired_sessions()
-                except Exception as e:
-                    logger.error(f"Error in cleanup task: {e}")
-
-        self._cleanup_task = asyncio.create_task(cleanup_expired_sessions())
-
-    async def _cleanup_expired_sessions(self):
-        #removes sessions that timed out
-        expired_sessions = [
-            session_id for session_id, session in self.sessions.items()
-            if session.is_expired(self.session_timeout_minutes)
-        ]
-
-        for session_id in expired_sessions:
-            session = self.sessions.pop(session_id)
-            logger.info(f"Cleaned up expired session: {session_id}")
-
-    async def create_session(
-        self,
-        user_id: str,
-        user_metadata: Dict[str, Any] = None
-    ) -> str:
-        #creates new session with unique id
-        session_id = str(uuid.uuid4())
-
-        session = UserSession(
-            session_id=session_id,
-            user_id=user_id,
-            created_at=datetime.now(),
-            last_accessed=datetime.now(),
-            agents={},
-            conversation_history=[],
-            user_metadata=user_metadata or {},
-            interview_phase=1,
-            phase_exchange_count=0
-        )
-
-        self.sessions[session_id] = session
-        logger.info(f"Created session {session_id} for user {user_id} with metadata: {user_metadata}")
-
-        return session_id
-
-    async def get_session(self, session_id: str) -> Optional[UserSession]:
-        #fetches session and refreshes timeout
-        session = self.sessions.get(session_id)
-        if session and not session.is_expired(self.session_timeout_minutes):
-            session.update_access_time()
-            return session
-        elif session:
-            del self.sessions[session_id]
-        return None
-
-    def create_agents(self, user_metadata: Dict[str, Any] = None) -> Dict[str, Agent]:
-        #builds the full agent network for interviewing
-
-        #formats user political data for agent context
-        metadata_context = ""
-        if user_metadata:
-            metadata_context = "\n".join(
-                f"- {key}: {value}" for key, value in user_metadata.items()
-            )
-        
-        print(metadata_context)
-
-        #agent that wraps up the interview with summary
-        summary_agent = Agent(
-            name="Summary Agent",
-            instructions=(
-                "Summarize the respondent's political attitudes and beliefs as expressed in the interview. "
-                "Provide a clear, comprehensive summary of their political identity, how they understand it, "
-                "the connections they draw between their identity and specific policy issues, "
-                "and any tensions or nuances they identified. "
-                "After providing the summary, hand off to the end_interview_agent to conclude."
-            ),
-            model="gpt-4o"
-        )
-
-        #closes out the conversation
-        end_interview_agent = Agent(
-            name="End Interview Agent",
-            instructions=(
-                "Provide a thoughtful conclusion to the interview and thank the respondent for sharing their political views. "
-                "Acknowledge the insights they shared about their political identity and beliefs. "
-                "If the respondent wants to end the interview early, acknowledge that gracefully. "
-                "Always end your response with 'CONCLUDE_INTERVIEW' to signal the interview is complete."
-            ),
-            model="gpt-4o"
-        )
-
-        #monitors for inappropriate content
-        guardrail_agent = Agent(
-            name="Guardrail Agent",
-            instructions=(
-                "Monitor political conversation for safety and appropriateness. "
-                "Ensure the discussion remains respectful and focused on understanding the respondent's political views. "
-                "If the conversation becomes hostile or unsafe, respond with 'FLAG: [reason]' and ask a clarifying question to redirect the conversation constructively. "
-                "Otherwise, respond with 'CLEAR' to indicate the conversation is appropriate. "
-                "Do not flag content that is related to political opinions, no matter how controversial, as long as the conversation remains on-topic and respectful."
-            ),
-            model="gpt-4o"
-        )
-
-        #retrieves relevant user data based on conversation
-        context_agent = Agent(
-            name="Context Agent",
-            instructions=(
-                "You provide relevant background information about the respondent to help guide the interview. "
-                f"The respondent completed a pre-survey with the following information:\n{metadata_context}\n\n"
-                "When asked, identify which pieces of this pre-survey data are most relevant to the current topic of discussion. "
-                "Output ONLY the relevant data points that would help the interviewer ask more informed questions. "
-            ),
-            model="gpt-4o"
-        )
-
-        #decides when to switch interview phases
-        phase_transition_agent = Agent(
-            name="Phase Transition Agent",
-            instructions=(
-                "You evaluate the progress of the interview to determine if it's time to transition to the next phase.\n"
-                "Based on the conversation history and the current phase, assess whether the goals of the current phase have been met.\n"
-                "You manage transitions between the four phases of this political interview. "
-                "Analyze the conversation to determine which phase we are in and whether the goals for that phase have been met.\n\n"
-                "PHASE 1 - INTRODUCTION / ICE-BREAKING:\n"
-                "Goals: Establish rapport, make respondent comfortable, learn basic background.\n"
-                "Transition when: Respondent seems at ease and has shared some background about themselves.\n\n"
-                "PHASE 2 - POLITICAL IDENTITY MEANING:\n"
-                "Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means to them personally.\n"
-                "Transition when: Respondent has articulated their understanding of their political identity and what it represents to them.\n\n"
-                "PHASE 3 - CONNECTIONS BETWEEN IDENTITY AND ISSUES:\n"
-                "Goals: Explore how the respondent sees their policy stances connecting to their broader political identity.\n"
-                "Transition when: Respondent has explained how at least some of their issue positions relate to their identity/worldview.\n\n"
-                "PHASE 4 - TENSIONS BETWEEN IDENTITY AND ISSUES:\n"
-                "Goals: Identify and explore any tensions or inconsistencies between stated identity and issue stances.\n"
-                "Transition when: Respondent has reflected on potential tensions, or confirmed their views are consistent and explained why.\n\n"
-                "DECISION RULES:\n"
-                "- If the current phase goals have been met, hand off to interview_agent with clear guidance to move to the next phase.\n"
-                "- If in Phase 4 and goals are met, hand off to summary_agent to conclude.\n"
-                "- If the respondent wants to end early, hand off to end_interview_agent.\n"
-                "- If the current phase goals are NOT yet met, hand off back to interview_agent with guidance on what still needs to be explored.\n"
-                "- After phase transition decisions, hand off to interview_agent to continue the conversation with information on phase\n"
-                "- Never display any phase transition logic or instructions to the respondent. Only communicate through handoffs."
-            ),
-            model="gpt-4o",
-            handoffs=[
-                handoff(summary_agent),
-                handoff(end_interview_agent)
-            ]
-        )
-
-        #decides when to shift topics within a phase
-        topic_transition_agent = Agent(
-            name="Topic Transition Agent",
-            instructions=(
-                "You help the interviewer transition smoothly between different topics within the current interview phase. "
-                "Based on the conversation history, determine whether:\n"
-                "1. The current topic has been sufficiently explored\n"
-                "2. There are other relevant topics to explore within this phase\n"
-                "3. Whether additional context from the pre-survey would be helpful\n\n"
-                "When transitioning topics:\n"
-                "- Hand off to context_agent to retrieve relevant pre-survey data about the new topic\n"
-                "- Then hand off to interview_agent with guidance on what topic to explore next\n\n"
-                "If the current topic is not yet exhausted, hand off to interview_agent with guidance to continue the current line of inquiry.\n\n"
-                "If it seems like the overall phase goals are complete, hand off to phase_transition_agent to assess whether to move to the next phase."
-            ),
-            model="gpt-4o",
-            handoffs=[
-                handoff(context_agent),
-                handoff(phase_transition_agent)
-            ]
-        )
-
-        #main interviewer agent that asks questions
-        interview_agent = Agent(
-            name="Political Interview Agent",
-            instructions=(
-               "You are conducting a thoughtful interview about the respondent's political belief systems. "
-                "Your goal is to understand how they see the relationships between their political identity "
-                "(liberal/moderate/conservative) and their stances on policy issues.\n\n"
-                "THE INTERVIEW HAS FOUR PHASES:\n"
-                "1. INTRODUCTION: Introduce yourself warmly as an AI Conversation Bot to understand your political stances and ideologies and ask 1 or 2 background questions to establish rapport. "
-                "Keep this brief - just enough to make the respondent comfortable.\n\n"
-                "2. POLITICAL IDENTITY MEANING: Recall the ideological identity the respondent reported in the pre-survey "
-                "(liberal/moderate/conservative based on their ideology score) and ask them to elaborate on what that identity means to them. "
-                "What does it mean to be a [liberal/moderate/conservative] in their view?\n\n"
-                "3. CONNECTIONS BETWEEN IDENTITY AND ISSUES: Ask the respondent to reflect on the relationship between "
-                "their political identity/worldview and the issue stances they reported. How do their policy positions "
-                "connect to their broader political identity?\n\n"
-                "4. TENSIONS BETWEEN IDENTITY AND ISSUES: Based on the pre-survey data, identify any potential tensions "
-                "between the respondent's stated political identity and their issue stances. Ask them to reflect on these tensions. "
-                "If no clear tensions exist, ask about areas where they might diverge from others who share their identity.\n\n"
-                "INTERVIEW GUIDELINES:\n"
-                "- Ask ONLY ONE question at a time\n"
-                "- Ask open-ended questions, NOT yes/no questions\n"
-                "- Remain non-judgmental - focus on understanding, not debating\n"
-                "- Always lead with questions - do not wait for the respondent to start\n"
-                "- When you need additional background information about the respondent to ask a more informed question, hand off to context_agent\n"
-                "- When you feel you MAY HAVE sufficiently explored the current topic, hand off to topic_transition_agent to assess next steps\n"
-                "- AFTER EACH QUESTION, hand off to phase_transition_agent to assess progress\n"
-                "- ALWAYS ASK A QUESTION IN THE MESSAGE EXCEPT AT THE CONCLUSION\n"
-                "- When guidance is given by ANY HANDOFF or AGENT of the interview, NEVER MENTION THE PHASES OR TRANSITIONS,instead ask a question related to the next phase\n"
-                "- Conclude the interview after 15-20 questions or if the respondent wishes to end early\n"
-            ),
-            model="gpt-4o",
-            handoffs=[
-                handoff(context_agent),
-                handoff(topic_transition_agent),
-                handoff(phase_transition_agent)
-            ]
-        )
-
-        #wire up the handoff chains
-        phase_transition_agent.handoffs.append(handoff(interview_agent))
-        topic_transition_agent.handoffs.append(handoff(interview_agent))
-        context_agent.handoffs = [handoff(interview_agent)]
-        summary_agent.handoffs = [handoff(end_interview_agent)]
-
-        return {
-            'interview_agent': interview_agent,
-            'phase_transition_agent': phase_transition_agent,
-            'topic_transition_agent': topic_transition_agent,
-            'summary_agent': summary_agent,
-            'end_interview_agent': end_interview_agent,
-            'guardrail_agent': guardrail_agent,
-            'context_agent': context_agent
-        }
-
-    async def setup_session_agents(self, session_id: str) -> bool:
-        #initializes agents for a specific session
-        session = await self.get_session(session_id)
-        if not session:
-            return False
-
-        session.agents = self.create_agents(session.user_metadata)
-        return True
-
-    async def close_session(self, session_id: str):
-        #manually terminates a session
-        session = self.sessions.pop(session_id, None)
-        if session:
-            logger.info(f"Closed session: {session_id}")
-
-    async def close(self):
-        #shuts down manager and all sessions
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-
-        self.sessions.clear()
-
-
-session_manager: Optional[OptimizedSessionManager] = None
-
+DB_PATH = "interviews.db"
 
 class SessionCreateRequest(BaseModel):
     user_id: Optional[str] = None
@@ -320,33 +33,285 @@ class InterviewRequest(BaseModel):
 class InterviewResponse(BaseModel):
     reply: str
     session_id: str
+    interview_phase: int
     end_signal: Optional[str] = None
+
+
+def _init_meta_db():
+    con = sqlite3.connect(DB_PATH)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS session_meta (
+            session_id TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL,
+            metadata   TEXT NOT NULL,
+            phase      INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    con.commit()
+    con.close()
+
+def _save_meta(session_id: str, user_id: str, user_metadata: dict, phase: int):
+    con = sqlite3.connect(DB_PATH)
+    con.execute(
+        "INSERT OR REPLACE INTO session_meta (session_id, user_id, metadata, phase) VALUES (?,?,?,?)",
+        (session_id, user_id, json.dumps(user_metadata), phase)
+    )
+    con.commit()
+    con.close()
+
+def _load_meta(session_id: str) -> Optional[Dict[str, Any]]:
+    con = sqlite3.connect(DB_PATH)
+    row = con.execute(
+        "SELECT user_id, metadata, phase FROM session_meta WHERE session_id = ?",
+        (session_id,)
+    ).fetchone()
+    con.close()
+    if not row:
+        return None
+    return {"user_id": row[0], "user_metadata": json.loads(row[1]), "interview_phase": row[2]}
+
+def _update_phase(session_id: str, phase: int):
+    con = sqlite3.connect(DB_PATH)
+    con.execute("UPDATE session_meta SET phase = ? WHERE session_id = ?", (phase, session_id))
+    con.commit()
+    con.close()
+
+def _delete_meta(session_id: str):
+    con = sqlite3.connect(DB_PATH)
+    con.execute("DELETE FROM session_meta WHERE session_id = ?", (session_id,))
+    con.commit()
+    con.close()
+
+
+_agent_cache: Dict[str, Dict[str, Agent]] = {}
+
+
+def create_agents(session_id: str) -> Dict[str, Agent]:
+
+    def advance_phase(ctx: RunContextWrapper) -> None:
+        meta = _load_meta(session_id)
+        if meta and meta["interview_phase"] < 4:
+            new_phase = meta["interview_phase"] + 1
+            _update_phase(session_id, new_phase)
+            logger.info(f"Session {session_id} → phase {new_phase}")
+
+    def mark_complete(ctx: RunContextWrapper) -> None:
+        _update_phase(session_id, 5)
+        logger.info(f"Session {session_id} → complete")
+
+    end_interview_agent = Agent(
+        name="End Interview Agent",
+        model="gpt-4o",
+        instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+
+        Provide a thoughtful conclusion to the interview and thank the respondent for sharing their
+        political views. Acknowledge the specific insights they shared about their political identity
+        and beliefs throughout the conversation. If the respondent wants to end the interview early,
+        acknowledge that gracefully and thank them for the time they gave.
+
+        Always end your response with 'CONCLUDE_INTERVIEW' to signal the interview is complete.
+        """
+    )
+
+    summary_agent = Agent(
+        name="Summary Agent",
+        model="gpt-4o",
+        handoffs=[handoff(end_interview_agent, on_handoff=mark_complete)],
+        instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+
+        Summarize the respondent's political attitudes and beliefs as expressed throughout the interview.
+        Provide a clear, comprehensive summary covering: their political identity and what it means to
+        them personally, the connections they drew between their identity and specific policy issues,
+        and any tensions or nuances they identified between their worldview and their issue positions.
+        After providing the summary, hand off to the End Interview Agent to conclude.
+        """
+    )
+
+    guardrail_agent = Agent(
+        name="Guardrail Agent",
+        model="gpt-4o",
+        instructions="""
+        You are a light-touch safety monitor for a political research interview. Your job is to flag
+        only genuinely harmful content — not controversial opinions.
+
+        Respond with 'CLEAR' in the vast majority of cases. Political opinions, even extreme or
+        inflammatory ones, are expected and should never be flagged. Only respond with 'FLAG: [reason]'
+        if the respondent is being personally abusive toward the interviewer, making credible threats,
+        or sending content that is completely unrelated to politics (e.g. spam or explicit content).
+
+        When in doubt, respond with 'CLEAR'.
+        """
+    )
+
+    phase_transition_agent = Agent(
+        name="Phase Transition Agent",
+        model="gpt-4o",
+        handoffs=[
+            handoff(summary_agent, on_handoff=mark_complete),
+            handoff(end_interview_agent, on_handoff=mark_complete),
+        ],
+        instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+
+        You evaluate interview progress and determine when to move to the next phase. Analyze the full
+        conversation history to assess whether the goals of the current phase have been met.
+
+        PHASE 1 - INTRODUCTION:
+        Goals: Open warmly and learn the respondent's overall feelings about politics and the issues
+        most important to them.
+        Transition when: The respondent has shared their general political feelings and named the issues
+        they care most about.
+
+        PHASE 2 - POLITICAL IDENTITY MEANING:
+        Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means
+        to them personally — not just a label, but what values and worldview it reflects.
+        Transition when: The respondent has articulated in their own words what their political identity
+        represents to them.
+
+        PHASE 3 - CONNECTIONS BETWEEN IDENTITY AND ISSUES:
+        Goals: Explore how the respondent sees their specific policy stances as flowing from or
+        connecting to their broader political identity.
+        Transition when: The respondent has explained how at least some of their issue positions relate
+        to their identity or worldview.
+
+        PHASE 4 - TENSIONS BETWEEN IDENTITY AND ISSUES:
+        Goals: Identify and explore any tensions or inconsistencies between their stated identity and
+        their specific issue stances. Close by asking how they see themselves within the broader
+        landscape of US politics.
+        Transition when: The respondent has reflected on tensions and described how they situate
+        themselves in broader US politics.
+
+        DECISION RULES:
+        If the current phase goals are met, hand off to Political Interview Agent with a suggested
+        bridging question that flows naturally from what the respondent just said into the next topic.
+        The bridging question must sound like a curious, natural follow-up — never announce that you
+        are moving on or changing topics.
+        If in Phase 4 and all goals are met, hand off to Summary Agent to conclude.
+        If the respondent wants to end early, hand off to End Interview Agent.
+        If current phase goals are not yet met, hand off to Political Interview Agent with a suggested
+        follow-up question that continues the current line of inquiry naturally.
+        Never reveal phase logic, agent names, transition language, or any meta-commentary about the
+        interview structure to the respondent or in the handoff message.
+        """
+    )
+
+    topic_transition_agent = Agent(
+        name="Topic Transition Agent",
+        model="gpt-4o",
+        handoffs=[
+            handoff(phase_transition_agent),
+        ],
+        instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+
+        You help the interviewer move between topics within the current interview phase. Based on the
+        conversation history, determine whether the current topic has been sufficiently explored and
+        whether there are other relevant topics to cover within this phase.
+
+        When handing off back to the Political Interview Agent, provide a suggested question that flows
+        naturally from what the respondent just said into the new topic. The question must feel like an
+        organic follow-up, not a change of subject. Never use phrases like "moving on", "let's shift",
+        "turning to", or any language that signals a topic or phase change to the respondent.
+
+        If the current topic is not yet exhausted, hand off to Political Interview Agent with a
+        suggested follow-up question that continues the current line of inquiry. If the overall phase
+        goals appear complete, hand off to Phase Transition Agent.
+        """
+    )
+
+    interview_agent = Agent(
+        name="Political Interview Agent",
+        model="gpt-4o",
+        handoffs=[
+            handoff(topic_transition_agent),
+            handoff(phase_transition_agent),
+        ],
+        instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+
+        You are conducting a thoughtful qualitative interview about the respondent's political belief
+        systems. Your goal is to understand how they see the relationships between their political
+        identity (liberal/moderate/conservative) and their stances on specific policy issues. The
+        pre-survey background at the start of this conversation contains their ideology score and issue
+        positions — use this throughout to ask informed, specific questions. Never read it back verbatim;
+        let it guide which connections and tensions you probe.
+
+        THE INTERVIEW HAS FOUR PHASES:
+
+        Phase 1 — Introduction: Open by asking the respondent about their overall thoughts and feelings
+        toward politics and which issues matter most to them. Keep this brief — 1 to 2 exchanges —
+        before moving on.
+
+        Phase 2 — Political Identity Meaning: Using their ideology score from the pre-survey, ask them
+        to elaborate on what that identity means to them personally. What does it mean to be a
+        liberal, moderate, or conservative in their view?
+
+        Phase 3 — Connections Between Identity and Issues: Ask the respondent to reflect on how their
+        specific policy positions connect to their broader political identity. Draw on their pre-survey
+        issue stances to ask targeted follow-up questions.
+
+        Phase 4 — Tensions Between Identity and Issues: Identify potential tensions between their
+        stated identity and their specific issue stances using the pre-survey data. Ask them to reflect
+        on these. If no clear tensions exist, explore where they might diverge from others who share
+        their identity. Close this phase by asking how they see themselves within the broader landscape
+        of US politics.
+
+        AGENTS AND HANDOFFS:
+        Call Topic Transition Agent when the current political topic has been sufficiently explored and
+        you want to move to a new topic within the same phase. Call Phase Transition Agent when you
+        believe the goals of the current phase are fully met.
+
+        When you receive a handoff back from either transition agent, they will suggest a bridging
+        question — use it as your next question exactly as suggested or adapt it slightly. Never
+        announce to the respondent that you are transitioning, moving on, or shifting topics. The
+        conversation must always feel like a natural, flowing dialogue.
+
+        CRITICAL: Never say anything like "moving on to the next topic", "let's shift to", "turning to
+        another area", "for the next part of our conversation", or any phrase that signals a structured
+        transition. Simply ask the next question as if it arose naturally from the conversation.
+
+        INTERVIEW GUIDELINES:
+        Ask only one question at a time. Ask open-ended questions, not yes/no questions. Remain
+        non-judgmental and focus on understanding, not debating. Always lead with a question — do not
+        wait for the respondent to start. Use the pre-survey metadata to ask informed, specific
+        questions that draw on their stated issue positions. Never mention phases, transitions, or
+        agent names to the respondent. Conclude after 15 to 20 questions or if the respondent wishes
+        to end early.
+        """
+    )
+
+    phase_transition_agent.handoffs.append(
+        handoff(interview_agent, on_handoff=advance_phase)
+    )
+    topic_transition_agent.handoffs.append(handoff(interview_agent))
+
+    return {
+        "interview_agent":        interview_agent,
+        "phase_transition_agent": phase_transition_agent,
+        "topic_transition_agent": topic_transition_agent,
+        "summary_agent":          summary_agent,
+        "end_interview_agent":    end_interview_agent,
+        "guardrail_agent":        guardrail_agent,
+    }
+
+
+def get_or_create_agents(session_id: str) -> Dict[str, Agent]:
+    if session_id not in _agent_cache:
+        _agent_cache[session_id] = create_agents(session_id)
+    return _agent_cache[session_id]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    #handles startup and shutdown for the api
-    global session_manager
-
-    session_manager = OptimizedSessionManager(session_timeout_minutes=60)
-
-    logger.info("Session Manager initialized")
-
+    _init_meta_db()
+    logger.info("Political Interview API started — DB initialised")
     yield
+    logger.info("Political Interview API shutting down")
 
-    if session_manager:
-        await session_manager.close()
-        logger.info("Session Manager closed")
 
 app = FastAPI(
     title="Political Belief Systems Interview Agent API",
-    version="3.0.0",
+    version="4.0.0",
     lifespan=lifespan
 )
 
-from fastapi.middleware.cors import CORSMiddleware
-
-#allows requests from qualtrics survey platform
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://duke.yul1.qualtrics.com"],
@@ -355,213 +320,168 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def format_conversation_history(history: List[dict]) -> str:
-    #converts message list to readable text
-    return "\n".join(f"{msg['role'].capitalize()}: {msg['content']}" for msg in history)
-
-async def get_or_create_session(
-    session_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-    user_metadata: Optional[Dict[str, Any]] = None
-) -> UserSession:
-    #retrieves existing session or makes new one
-    if session_id:
-        session = await session_manager.get_session(session_id)
-        if session:
-            return session
-        else:
-            raise HTTPException(status_code=404, detail="Session not found or expired")
-
-    if not user_id:
-        user_id = f"user_{uuid.uuid4().hex[:8]}"
-
-    new_session_id = await session_manager.create_session(
-        user_id=user_id,
-        user_metadata=user_metadata
-    )
-
-    await session_manager.setup_session_agents(new_session_id)
-
-    session = await session_manager.get_session(new_session_id)
-    if not session:
-        raise HTTPException(status_code=500, detail="Failed to create session")
-
-    return session
 
 @app.post("/sessions", response_model=SessionCreateResponse)
 async def create_session(request: SessionCreateRequest):
-    #endpoint to start new interview session
-    try:
-        user_id = request.user_id or f"user_{uuid.uuid4().hex[:8]}"
+    user_id = request.user_id or f"user_{uuid.uuid4().hex[:8]}"
+    session_id = str(uuid.uuid4())
+    user_metadata = request.user_metadata or {}
 
-        session_id = await session_manager.create_session(
-            user_id=user_id,
-            user_metadata=request.user_metadata
-        )
+    _save_meta(session_id, user_id, user_metadata, phase=1)
+    logger.info(f"Created session {session_id} for user {user_id}")
 
-        await session_manager.setup_session_agents(session_id)
+    return SessionCreateResponse(session_id=session_id, user_id=user_id)
 
-        return SessionCreateResponse(
-            session_id=session_id,
-            user_id=user_id
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
 
 @app.post("/chat", response_model=InterviewResponse)
 async def chat_endpoint(request: InterviewRequest):
-    #main endpoint for sending messages to interview agent
-    try:
-        #get or create session
-        session = await get_or_create_session(request.session_id)
+    session_id = request.session_id
 
-        #use stored history if none provided
-        if not request.conversation_history and session.conversation_history:
-            conversation_history = session.conversation_history
-        else:
-            conversation_history = request.conversation_history or []
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required. Call POST /sessions first.")
 
-        #handle interview kickoff
-        if not conversation_history and request.message.lower() in ["hello", "hi", "start", "begin"]:
-            opening_prompt = (
-                "Begin the interview in Phase 1 (Introduction). "
-                "Introduce yourself warmly as an interviewer interested in understanding their political beliefs. "
-                "Establish rapport before moving into the substantive interview. "
-                "Remember: ask ONE question at a time and keep it open-ended."
-            )
-            #runner handles agent execution and handoffs
-            result = await Runner.run(session.agents['interview_agent'], opening_prompt)
+    meta = _load_meta(session_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Session not found. It may have been deleted or the server restarted before this session was created.")
 
-            response_content = result.final_output
+    agents      = get_or_create_agents(session_id)
+    sdk_session = SQLiteSession(session_id, DB_PATH)
+    is_kickoff  = request.message.lower().strip() in {"hello", "hi", "start", "begin"}
 
-            #save to history
-            session.conversation_history.append({"role": "user", "content": request.message})
-            session.conversation_history.append({"role": "assistant", "content": response_content})
-
-            #check if interview ended
-            end_signal = "conclude" if "CONCLUDE_INTERVIEW" in response_content else None
-
-            return InterviewResponse(
-                reply=response_content,
-                session_id=session.session_id,
-                end_signal=end_signal
-            )
-
-        #build conversation context
-        convo_history = ""
-        if conversation_history:
-            convo_history = format_conversation_history(conversation_history)
-
-        #check message safety
-        guardrail_input = f"Political conversation:\n{convo_history}\n\nLatest input: {request.message}"
-        guardrail_result = await Runner.run(session.agents['guardrail_agent'], guardrail_input)
-
+    if not is_kickoff:
+        guardrail_result = await Runner.run(
+            agents["guardrail_agent"],
+            f"Latest respondent input: {request.message}",
+            session=SQLiteSession(f"{session_id}_guardrail", DB_PATH)
+        )
         if "flag" in guardrail_result.final_output.lower():
-            #flagged content - redirect conversation
-            response_content = guardrail_result.final_output.replace("FLAG:", "").strip()
-            if not response_content:
-                response_content = "I appreciate your input, but let's keep our discussion respectful and focused on understanding your views."
-
-            session.conversation_history.append({"role": "user", "content": request.message})
-            session.conversation_history.append({"role": "assistant", "content": response_content})
-
+            reply = guardrail_result.final_output.replace("FLAG:", "").strip() or (
+                "Let's keep our conversation respectful. Could you tell me more about your political views?"
+            )
             return InterviewResponse(
-                reply=response_content,
-                session_id=session.session_id,
-                end_signal=None
+                reply=reply,
+                session_id=session_id,
+                interview_phase=meta["interview_phase"]
             )
 
-        #run main interview agent with full context
-        agent_input = (
-            f"Conversation so far:\n{convo_history}\n\n"
-            f"Respondent's latest response: {request.message}\n\n"
-            f"Current phase: {session.interview_phase}\n\n"
-            f"As the interviewer, respond thoughtfully to their answer and ask a follow-up question. "
-            f"If you need more context about the respondent's background to ask an informed question, hand off to context_agent. "
-            f"If you feel you've sufficiently explored the current topic, hand off to topic_transition_agent. "
-            f"Remember: ask ONE open-ended question at a time, remain non-judgmental, and focus on understanding their views."
-        )
+    if is_kickoff:
+        metadata_str = "\n".join(
+            f"  - {k}: {v}" for k, v in meta["user_metadata"].items()
+        ) or "  (No pre-survey data available)"
 
-        #runner automatically handles agent handoffs
-        result = await Runner.run(session.agents['interview_agent'], agent_input)
-        response_content = result.final_output
+        agent_input = f"""Begin the interview in Phase 1 (Introduction). Introduce yourself warmly as
+        an AI Conversation Bot here to learn about the respondent's political views and beliefs. Your
+        opening question should ask about their overall thoughts and feelings toward politics and which
+        political issues matter most to them. Ask only this ONE open-ended question to open the
+        conversation.
 
-        #check for conclusion signal
-        end_signal = None
-        if "CONCLUDE_INTERVIEW" in response_content:
-            end_signal = "conclude"
+        PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
+        informed, targeted questions. Reference their specific issue positions and ideology naturally;
+        do not read it back verbatim:
+        {metadata_str}"""
 
-        #save exchange to history
-        session.conversation_history.append({"role": "user", "content": request.message})
-        session.conversation_history.append({"role": "assistant", "content": response_content})
+    else:
+        agent_input = f"""Respondent's latest response: {request.message}
 
-        return InterviewResponse(
-            reply=response_content,
-            session_id=session.session_id,
-            end_signal=end_signal
-        )
+        Respond thoughtfully and ask a follow-up question. The pre-survey background shared at the
+        start of this conversation is in your history — use it to inform the direction and depth of
+        your questions. If you have sufficiently explored the current topic, hand off to Topic
+        Transition Agent. If you believe the current phase goals are fully met, hand off to Phase
+        Transition Agent. Ask ONE open-ended question at a time and remain non-judgmental."""
 
-    except Exception as e:
-        logger.error(f"Error in chat endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    result = await Runner.run(
+        agents["interview_agent"],
+        agent_input,
+        session=sdk_session
+    )
+    response_content = result.final_output
+
+    updated_meta  = _load_meta(session_id)
+    current_phase = updated_meta["interview_phase"] if updated_meta else meta["interview_phase"]
+
+    end_signal = None
+    if "CONCLUDE_INTERVIEW" in response_content:
+        end_signal = "conclude"
+        response_content = response_content.replace("CONCLUDE_INTERVIEW", "").strip()
+
+    if current_phase == 5 and session_id in _agent_cache:
+        del _agent_cache[session_id]
+
+    return InterviewResponse(
+        reply=response_content,
+        session_id=session_id,
+        interview_phase=current_phase,
+        end_signal=end_signal
+    )
+
 
 @app.get("/sessions/{session_id}/history")
 async def get_session_history(session_id: str):
-    #fetches full conversation history for a session
-    session = await session_manager.get_session(session_id)
-    if not session:
+    meta = _load_meta(session_id)
+    if not meta:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    sdk_session = SQLiteSession(session_id, DB_PATH)
+    history     = await sdk_session.get_items()
 
     return {
-        "session_id": session_id,
-        "conversation_history": session.conversation_history,
-        "created_at": session.created_at.isoformat(),
-        "last_accessed": session.last_accessed.isoformat(),
-        "user_metadata": session.user_metadata,
-        "interview_phase": session.interview_phase
+        "session_id":           session_id,
+        "conversation_history": history,
+        "user_metadata":        meta["user_metadata"],
+        "interview_phase":      meta["interview_phase"],
     }
 
+
 @app.delete("/sessions/{session_id}")
-async def close_session_endpoint(session_id: str):
-    #endpoint to manually close a session
-    session = await session_manager.get_session(session_id)
-    if not session:
+async def close_session(session_id: str):
+    meta = _load_meta(session_id)
+    if not meta:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    await session_manager.close_session(session_id)
+    sdk_session = SQLiteSession(session_id, DB_PATH)
+    await sdk_session.clear_session()
+    _delete_meta(session_id)
+    _agent_cache.pop(session_id, None)
+
     return {"message": f"Session {session_id} closed successfully"}
+
 
 @app.get("/sessions")
 async def list_sessions():
-    #lists all active sessions for debugging
-    sessions = []
-    for session_id, session in session_manager.sessions.items():
-        sessions.append({
-            "session_id": session_id,
-            "user_id": session.user_id,
-            "created_at": session.created_at.isoformat(),
-            "last_accessed": session.last_accessed.isoformat(),
-            "conversation_count": len(session.conversation_history),
-            "user_metadata": session.user_metadata,
-            "interview_phase": session.interview_phase
-        })
+    con  = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        "SELECT session_id, user_id, metadata, phase FROM session_meta"
+    ).fetchall()
+    con.close()
 
-    return {"active_sessions": sessions}
+    return {
+        "active_sessions": [
+            {
+                "session_id":      row[0],
+                "user_id":         row[1],
+                "user_metadata":   json.loads(row[2]),
+                "interview_phase": row[3],
+            }
+            for row in rows
+        ]
+    }
+
 
 @app.get("/health")
 async def health_check():
-    #simple endpoint to check if api is running
+    con   = sqlite3.connect(DB_PATH)
+    count = con.execute("SELECT COUNT(*) FROM session_meta").fetchone()[0]
+    con.close()
     return {
-        "status": "healthy",
-        "message": "Political Belief Systems Interview Agent API is running",
-        "active_sessions": len(session_manager.sessions) if session_manager else 0,
-        "version": "3.0.0"
+        "status":          "healthy",
+        "message":         "Political Belief Systems Interview Agent API is running",
+        "active_sessions": count,
+        "version":         "4.0.0",
     }
+
 
 if __name__ == "__main__":
     import uvicorn
     if not os.getenv("OPENAI_API_KEY"):
         print("Warning: OPENAI_API_KEY environment variable not set")
-
     uvicorn.run(app, host="localhost", port=8000)
