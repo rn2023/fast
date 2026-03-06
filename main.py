@@ -128,7 +128,7 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         - Briefly acknowledges something specific from their reaction to the summary
         - Wishes them well
 
-        Keep it concise — 3 to 5 sentences. Do not re-summarize their views.
+        Keep it concise — 2-3 sentences. Do not re-summarize their views.
 
         Always end your response with the token CONCLUDE_INTERVIEW on its own at the very end,
         with no punctuation after it. This signals the system to close the interview.
@@ -247,13 +247,13 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
 
         THE INTERVIEW HAS FOUR SUBSTANTIVE PHASES:
 
-        PHASE 1 — INTRODUCTION (2 to 3 exchanges):
-        Goals: Establish warm rapport. Learn the respondent's overall feelings about politics and
-        which issues matter most to them. This phase should feel like the natural opening of a
-        conversation, not an interrogation. Allow 2 to 3 genuine exchanges before moving on — do not
-        rush. The respondent should feel heard before the interview deepens.
-        Transition when: The respondent has shared their general political feelings AND named at least
-        one or two issues they care about, AND the conversation feels naturally warmed up.
+        PHASE 1 — INTRODUCTION (2 questions):
+        Goals: Establish warm rapport. Learn the respondent's overall feelings about politics. 
+        This phase should feel like the natural opening of a
+        conversation, not an interrogation. Allow 2 genuine exchanges before moving on. 
+        The respondent should feel heard before the interview deepens.
+        Transition when: The respondent has shared their general political feelings 
+        AND the conversation feels naturally warmed up.
         Bridging into Phase 2: The first question in Phase 2 should arise organically from something
         the respondent just said. It should feel like genuine curiosity, not a gear-shift.
 
@@ -358,37 +358,33 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
 
         PRE-SURVEY METADATA USAGE — CRITICAL:
         The pre-survey background is at the start of this conversation. Before crafting EVERY question,
-        scan their metadata and their latest response. Ask yourself:
-        (1) Does their answer connect to or contradict a specific pre-survey position I can probe?
-        (2) Is there an issue in the metadata I haven't explored yet that could deepen the conversation?
-        (3) Can a specific metadata detail make this question feel more personal and tailored?
-        If yes to any of these, use that detail to sharpen your next question. Never read metadata
+        scan their metadata and their latest response to enhance the goals and fluidity of the conversation. Never read metadata
         back verbatim — let it guide which connections and tensions you probe.
 
         THE INTERVIEW HAS FOUR PHASES:
 
-        Phase 1 — Introduction (2 to 3 exchanges, warm and unhurried):
+        Phase 1 — Introduction (2 questions MAX):
         Open with genuine warmth. Ask about the respondent's overall thoughts and feelings toward
         politics in today's environment. Let the conversation breathe — this phase should feel like
-        the start of a real conversation, not a checklist. Ask 2 to 3 questions here before moving on.
+        the start of a real conversation, not a checklist. Ask 2 questions here before moving on.
         Follow up naturally on what they say. Show genuine interest in their perspective.
 
         Phase 2 — Political Identity and Meaning:
         Using their ideology score from the pre-survey, explore what that identity means to them
         personally. Not just "I'm a liberal" but what that label actually represents — their values,
         what they feel political identity is for, what it means in their daily life and worldview.
-        Probe with genuine curiosity and follow the thread of what they say.
+        Probe with genuine curiosity and follow the thread of what they say. USE THE PRE-SURVEY
 
         Phase 3 — Connections Between Identity and Issues:
         Ask the respondent to reflect on how their specific policy positions connect to their broader
         political identity. Draw on their pre-survey issue stances to ask targeted, specific questions.
-        Explore multiple issues where possible. Look for patterns in how they connect identity to policy.
+        Explore multiple issues where possible. Look for patterns in how they connect identity to policy. USE THE PRE-SURVEY
 
         Phase 4 — Tensions and Broader Political Landscape:
         Surface potential tensions between their stated identity and their specific issue stances using
         the pre-survey data. Ask them to reflect on these tensions. If no clear tensions exist, explore
         where they might diverge from others who share their identity. Close by asking how they see
-        themselves within the broader landscape of US politics today.
+        themselves within the broader landscape of US politics today. USE THE PRE-SURVEY
 
         AGENTS AND HANDOFFS:
         — Call Topic Transition Agent when the current topic feels explored but the phase is not done.
