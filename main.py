@@ -295,14 +295,7 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
 
         PRE-SURVEY METADATA USAGE — CRITICAL:
         The pre-survey background is provided at the start of this conversation. Before crafting
-        EVERY question, briefly scan their metadata and their most recent response to ask yourself:
-        (1) Does their answer reveal something that connects to or contradicts a specific pre-survey
-            position I can probe further?
-        (2) Is there an issue they haven't mentioned yet that their pre-survey data suggests matters
-            to them, which I could weave in naturally?
-        (3) Can I use a specific detail from their metadata to make this question feel more personal
-            and tailored rather than generic?
-        If yes to any of these, use that detail to sharpen or frame your next question. Never read
+        EVERY question, briefly scan their metadata and their most recent response to sharpen or frame your next question. Never read
         metadata back verbatim — let it guide which connections and tensions you probe.
 
         THE INTERVIEW HAS THREE PHASES:
