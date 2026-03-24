@@ -231,7 +231,14 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         PHASE 1 - INTRODUCTION:
         Goals: Open warmly and learn the respondent's overall feelings about politics and the issues
         most important to them.
-        Transition when: The respondent has shared their general political feelings.
+        Transition when: The respondent has shared their general political feelings
+        Phase 1 to Phase 2 bridging question: When transitioning from Phase 1 to Phase 2, the bridging question
+        must connect what the respondent just said about their political feelings to how they see
+        themselves politically. Draw on their ideology score and issue positions from the pre-survey
+        to make it specific — for example, if they identified as conservative and mentioned healthcare,
+        ask something like "You mentioned [what they said] — I'm curious how that connects to how you
+        see yourself politically. Would you describe yourself as conservative, liberal, somewhere in
+        between?" Do not use those exact words; make it feel natural and personal to what they said.
 
         PHASE 2 - POLITICAL IDENTITY MEANING:
         Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means
