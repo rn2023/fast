@@ -428,12 +428,12 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
             return f"Respondent's latest response: {last_respondent_msg['text']}"
 
     def _make_relay_handoff(target_agent, on_handoff_fn=None):
-        from agents.handoffs import Handoff as _H
-        import inspect as _inspect
-        # Build via the normal handoff() then swap the class
+        # Build via the normal handoff() then copy only the fields _RelayHandoff declares,
+        # ignoring any extra private fields (e.g. _agent_ref) that may exist in the
+        # installed SDK version but are not dataclass fields on the base class.
         h = handoff(target_agent, on_handoff=on_handoff_fn) if on_handoff_fn else handoff(target_agent)
-        # Reconstruct as _RelayHandoff by copying all fields
-        return _RelayHandoff(**{f.name: getattr(h, f.name) for f in _dc.fields(h)})
+        relay_field_names = {f.name for f in _dc.fields(_RelayHandoff)}
+        return _RelayHandoff(**{f.name: getattr(h, f.name) for f in _dc.fields(h) if f.name in relay_field_names})
 
     phase_transition_agent.handoffs.append(
         _make_relay_handoff(interview_agent, advance_phase_and_relay)
