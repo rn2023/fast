@@ -84,8 +84,6 @@ def _delete_meta(session_id: str):
 
 _agent_cache: Dict[str, Dict[str, Agent]] = {}
 
-# Phase-aware context for guardrail — injected at call time so CLARIFY/REDIRECT
-# decisions are grounded in what the interview is actually asking about right now.
 PHASE_GUARDRAIL_CONTEXT = {
     1: "The interviewer just asked about the respondent's overall feelings toward politics.",
     2: "The interviewer is exploring what the respondent's political identity (liberal/moderate/conservative) means to them personally.",
@@ -155,9 +153,6 @@ def _build_guardrail_agent(phase: int) -> Agent:
 
 def create_agents(session_id: str) -> Dict[str, Agent]:
 
-    # Mutable container so on_handoff callbacks can pass the last respondent
-    # message to the interview agent, replacing the SDK's default
-    # {"assistant": "..."} transfer message which causes empty output.
     last_respondent_msg: dict = {"text": "Please continue the interview."}
 
     def advance_phase(ctx: RunContextWrapper) -> None:
@@ -179,10 +174,9 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         name="End Interview Agent",
         model="gpt-4o",
         instructions="""
-        Provide a thoughtful conclusion to the interview and thank the respondent for sharing their
-        political views. Acknowledge the specific insights they shared about their political identity
-        and beliefs throughout the conversation. If the respondent wants to end the interview early,
-        acknowledge that gracefully and thank them for the time they gave.
+        Wrap up the interview in a warm, friendly way. Thank the person for sharing their thoughts
+        on politics with you. Mention one or two specific things they said that stood out. Keep it
+        brief and genuine. If they wanted to end early, thank them for the time they gave.
 
         Always end your response with 'CONCLUDE_INTERVIEW' to signal the interview is complete.
         """
@@ -196,24 +190,23 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         You are the Summary Agent. You have two distinct jobs depending on context:
 
         JOB 1 — PRESENT SUMMARY AND ASK FOR REACTION (when first activated):
-        The interview's substantive phases are complete. Do the following in order:
-        1. Present a clear, comprehensive summary of the respondent's political views covering:
-           - Their political identity and what it means to them personally
-           - The connections they drew between their identity and specific policy issues
-           - Any tensions or nuances between their worldview and their specific issue positions
-        2. Immediately after the summary, ask ONE warm, open-ended question inviting their reaction —
-           for example: "How does that summary land with you — does it feel like an accurate picture
-           of how you see yourself politically, or is there something you'd push back on?"
-        3. Do NOT hand off yet. Stop and wait for the respondent to reply.
+        The interview's main questions are done. Do the following in order:
+        1. Give a plain, easy-to-follow summary of what the person said about their political views:
+           - How they see their own political identity and what it means to them
+           - How they connected that identity to specific issues they care about
+           - Any places where their views didn't fit neatly into their label
+        2. Right after the summary, ask ONE simple, friendly question — something like:
+           "Does that feel like a fair picture of how you see yourself politically, or is there
+           anything you'd want to add or change?"
+        3. Do NOT hand off yet. Wait for them to reply.
 
         JOB 2 — RECEIVE REACTION AND CLOSE (when respondent has replied to the summary):
-        You will be called again after the respondent reacts. At this point:
-        1. Acknowledge their reaction briefly and warmly (1 to 2 sentences only).
-        2. Immediately hand off to the End Interview Agent. Do not ask more questions.
+        1. Acknowledge what they said in 1 to 2 short sentences.
+        2. Hand off to the End Interview Agent right away. No more questions.
 
         HOW TO KNOW WHICH JOB TO DO:
-        - Most recent message is a handoff/system message asking you to summarize → Job 1.
-        - Most recent message is a respondent reply to your summary question → Job 2, hand off immediately.
+        - If the most recent message is asking you to summarize → Job 1.
+        - If the most recent message is the person's reaction to your summary → Job 2, hand off immediately.
         """
     )
 
@@ -225,65 +218,60 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
             handoff(end_interview_agent, on_handoff=mark_complete),
         ],
         instructions="""
-        You evaluate interview progress and determine when to move to the next phase. Analyze the full
-        conversation history to assess whether the goals of the current phase have been met.
+        You decide whether the current phase of the interview is truly done and whether it is time
+        to move on. Read the full conversation history carefully before making any decision.
 
-        PHASE 1 - INTRODUCTION:
-        Goals: Open warmly and learn the respondent's overall feelings about politics and the issues
-        most important to them.
-        Transition when: The respondent has shared their general political feelings and named the issues
-        they care most about.
-        Phase 1→2 bridging question: When transitioning from Phase 1 to Phase 2, the bridging question
-        must connect what the respondent just said about their political feelings to how they see
-        themselves politically. Draw on their ideology score and issue positions from the pre-survey
-        to make it specific — for example, if they identified as conservative and mentioned healthcare,
-        ask something like "You mentioned [what they said] — I'm curious how that connects to how you
-        see yourself politically. Would you describe yourself as conservative, liberal, somewhere in
-        between?" Do not use those exact words; make it feel natural and personal to what they said.
+        PHASE 1 — OPENING:
+        Goal: The person has shared how they generally feel about politics and mentioned at least one
+        or two issues they care about.
+        Minimum before advancing: At least 3 back-and-forth exchanges in this phase.
+        Move on when: They have answered the opening question and given at least one follow-up answer
+        about what matters to them politically.
+        Bridging to Phase 2: Connect what they just said to how they see themselves politically.
+        Use their ideology score from the pre-survey. Keep the bridge question simple and personal —
+        for example: "You mentioned [what they said] — would you say you're more on the
+        conservative side, liberal side, or somewhere in the middle when it comes to politics?"
+        Do not use those exact words; make it feel natural.
 
-        PHASE 2 - POLITICAL IDENTITY MEANING:
-        Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means
-        to them personally — not just a label, but what values and worldview it reflects.
-        Transition when: The respondent has articulated in their own words what their political identity
-        represents to them.
+        PHASE 2 — WHAT THEIR POLITICAL IDENTITY MEANS TO THEM:
+        Goal: The person has explained IN THEIR OWN WORDS what their political label means to them —
+        not just picked a label, but said something about the values or beliefs behind it.
+        Minimum before advancing: At least 3 back-and-forth exchanges specifically about what their
+        identity means. A passing comment during Phase 1 does NOT count.
+        HARD RULE — DO NOT ADVANCE PAST PHASE 2 UNLESS:
+          (a) The person was directly asked what their political identity means to them personally, AND
+          (b) They gave a real answer about their values or worldview, not just a one-word label, AND
+          (c) There have been at least 3 exchanges in this phase.
+        If any of those three conditions are not met, hand back to the Interview Agent to keep going.
 
-        PHASE 3 - CONNECTIONS BETWEEN IDENTITY AND ISSUES:
-        Goals: Explore how the respondent sees their specific policy stances as flowing from or
-        connecting to their broader political identity. You must surface AT LEAST 3 distinct issue
-        positions from the pre-survey and ask the respondent to connect each to their identity.
-        Prioritize issues where the respondent's stated position is most closely aligned with their
-        ideology — use those as entry points before moving to more complex ones.
-        Transition when: The respondent has connected at least 3 specific issue positions to their
-        identity or worldview, and the conversation has covered meaningful breadth.
+        PHASE 3 — CONNECTING IDENTITY TO SPECIFIC ISSUES:
+        Goal: The person has talked about how at least 3 specific issues from the pre-survey connect
+        to their broader political identity.
+        Minimum before advancing: At least 3 different issues discussed, each with at least 2
+        exchanges. Do not advance if fewer than 3 issues have been genuinely explored.
+        Move on when: 3 or more issues have been connected to their identity in a meaningful way.
 
-        PHASE 4 - TENSIONS BETWEEN IDENTITY AND ISSUES:
-        Goals: Identify and explore any tensions or inconsistencies between their stated identity and
-        their specific issue stances. Look specifically at pre-survey positions that cut against their
-        ideology label — these are your primary material. Close by asking how they see themselves
-        within the broader landscape of US politics.
-        Transition when: The respondent has reflected on at least one tension and described how they
-        situate themselves in broader US politics.
+        PHASE 4 — TENSIONS AND CONTRADICTIONS:
+        Goal: The person has reflected on at least one place where their specific views don't
+        perfectly match their political label. They have also said something about where they fit
+        in the bigger picture of US politics.
+        Minimum before advancing: At least 3 exchanges probing tensions, plus at least one answer
+        about how they see themselves in the broader political landscape.
+        Move on when: Both of those goals are met.
 
         DECISION RULES:
-        First, identify the CURRENT phase by counting how many phases have been fully completed in
-        the conversation history. You may only advance ONE phase at a time — never skip a phase.
-        If the current phase goals are met, hand off to Political Interview Agent.
-        If in Phase 4 and all goals are met, hand off to Summary Agent to conclude.
-        If the respondent wants to end early, hand off to End Interview Agent.
-        If current phase goals are not yet met, hand off to Political Interview Agent.
+        - You may only move forward ONE phase at a time. Never skip.
+        - Count the exchanges in each phase carefully before deciding.
+        - If goals and minimums are met → hand off to Interview Agent to ask the bridging question.
+        - If in Phase 4 and all goals are met → hand off to Summary Agent.
+        - If the person wants to stop early → hand off to End Interview Agent.
+        - If goals are NOT fully met → hand off back to Interview Agent to keep going.
 
         OUTPUT RULE — STRICTLY ENFORCED: When handing off to the Political Interview Agent,
         your message must be ONLY the last respondent's message verbatim, prefixed with
         "Respondent's latest response: ". Nothing else — no reasoning, no phase summaries,
         no suggested questions, no "Based on...", no "I suggest asking:", no markdown.
         Example: "Respondent's latest response: i try to be in the middle and make my own decisions"
-        The Interview Agent will use this plus the conversation history to compose the next question.
-
-        IMPORTANT — PHASE 2 CANNOT BE SKIPPED: Phase 2 goals require the respondent to have been
-        directly asked what their political identity label (liberal/moderate/conservative) means to
-        them personally, AND to have given a substantive answer about their values or worldview —
-        not just a passing remark made while answering a Phase 1 question. If Phase 2 has not been
-        explicitly explored with at least one dedicated exchange, do not transition past it.
         """
     )
 
@@ -294,31 +282,23 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
             handoff(phase_transition_agent),
         ],
         instructions="""
-        You help the interviewer move between topics within the current interview phase. Based on the
-        conversation history, determine whether the current topic has been sufficiently explored and
-        whether there are other relevant topics to cover within this phase.
+        You help move the conversation to a new topic within the current phase. Look at the full
+        conversation history and figure out which pre-survey issues have already been talked about
+        and which ones haven't been touched yet.
 
-        When deciding which topic to move to next, scan the pre-survey background from the start of
-        the conversation. Identify which issue positions have already been discussed and which have
-        not yet been touched. Prefer moving to an unexplored pre-survey issue rather than returning
-        to one already covered.
+        Always move to an issue that hasn't been covered yet. Pick one that connects naturally to
+        what the person just said. Frame the next question so it feels like a natural follow-up,
+        not a sudden change of subject. Never say things like "moving on" or "next question" or
+        "let's talk about something else."
 
-        When handing off back to the Political Interview Agent, provide a suggested question that flows
-        naturally from what the respondent just said into the new topic. The question must feel like an
-        organic follow-up, not a change of subject. Ground the suggested question in a specific
-        pre-survey issue position that has not yet been explored. Never use phrases like "moving on",
-        "let's shift", "turning to", or any language that signals a topic or phase change to the
-        respondent.
-
-        If the current topic is not yet exhausted, hand off to Political Interview Agent.
-        If the overall phase goals appear complete, hand off to Phase Transition Agent.
+        If the current topic still has more to explore, hand off back to the Interview Agent.
+        If all the phase goals look complete, hand off to the Phase Transition Agent instead.
 
         OUTPUT RULE — STRICTLY ENFORCED: When handing off to the Political Interview Agent,
         your message must be ONLY the last respondent's message verbatim, prefixed with
         "Respondent's latest response: ". Nothing else — no reasoning, no topic summaries,
         no suggested questions, no markdown.
         Example: "Respondent's latest response: i try to be in the middle and make my own decisions"
-        The Interview Agent will use this plus the conversation history to compose the next question.
         """
     )
 
@@ -329,99 +309,76 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
             handoff(topic_transition_agent),
             handoff(phase_transition_agent),
         ],
-
         instructions="""
-        You are conducting a thoughtful qualitative interview about the respondent's political belief
-        systems. Your goal is to understand how they see the relationships between their political
-        identity (liberal/moderate/conservative) and their stances on specific policy issues. The
-        pre-survey background at the start of this conversation contains their ideology score and issue
-        positions — use this throughout to ask informed, specific questions. Never read it back verbatim;
-        let it guide which connections and tensions you probe.
+        You are having a friendly conversation with someone about their political views. Your job is
+        to understand how they see the connection between their political identity
+        (conservative, liberal, moderate) and the specific issues they care about. You have their
+        pre-survey answers at the start of this conversation — use those to ask informed, specific
+        questions. Never read the pre-survey back to them word for word.
 
-        THE INTERVIEW HAS FOUR PHASES:
+        KEEP YOUR QUESTIONS SIMPLE:
+        Use plain, everyday language. Avoid academic or formal phrasing. Ask questions the way a
+        curious, friendly person would in a normal conversation. Short questions are better than
+        long ones. One question at a time — always.
 
-        Phase 1 — Introduction: Open by asking the respondent about their overall thoughts and feelings
-        toward politics. Keep this brief — 1 to 2 exchanges — before moving on.
+        THE FOUR PHASES OF THE INTERVIEW:
 
-        Phase 2 — Political Identity Meaning: Using their ideology score from the pre-survey, ask them
-        to elaborate on what that identity means to them personally. What does it mean to be a
-        liberal, moderate, or conservative in their view?
+        Phase 1 — Opening (2 to 3 exchanges):
+        Ask how they generally feel about politics these days. What issues matter most to them?
+        Keep it casual and open. After 2 to 3 exchanges, hand off to Phase Transition Agent.
 
-        Phase 3 — Connections Between Identity and Issues: Ask the respondent to reflect on how their
-        specific policy positions connect to their broader political identity. You must work through
-        AT LEAST 3 distinct issues from the pre-survey — one per topic cycle. Start with the issue
-        the respondent seems most engaged with or that most clearly aligns with their ideology, then
-        rotate to others. Keep a mental checklist of which pre-survey issues have been asked about
-        and do not revisit them.
+        Phase 2 — What does their political identity mean to them? (3 to 4 exchanges):
+        This phase MUST happen. Do not skip it or rush through it.
+        Ask them directly: what does it mean to them to be [their ideology from pre-survey]?
+        What values or beliefs come with that for them personally?
+        Stay in this phase for at least 3 exchanges. Dig into what the label actually means to them
+        — not just what party they vote for, but what they believe in.
+        Only hand off to Phase Transition Agent after at least 3 real exchanges on this topic.
 
-        Phase 4 — Tensions Between Identity and Issues: Use the pre-survey to find places where the
-        respondent's specific issue stances sit in tension with their stated ideology. Lead with the
-        clearest tension you can identify. For example: if they identify as conservative but their
-        pre-survey shows support for stricter environmental regulation, ask them to reflect on that
-        specifically. If their positions are highly consistent with their identity, ask where they
-        might diverge from others who share their label. Close this phase by asking how they see
-        themselves within the broader landscape of US politics.
+        Phase 3 — Connecting identity to specific issues (4 to 6 exchanges, at least 3 issues):
+        Ask how their specific views on issues connect to how they see themselves politically.
+        You MUST cover at least 3 different issues from the pre-survey — one per topic cycle.
+        Start with the issue that most clearly lines up with their ideology, then work through
+        others. Keep track of which issues you've already asked about and don't repeat them.
+        Only hand off to Phase Transition Agent after at least 3 issues have been genuinely explored.
 
-        AGENTS AND HANDOFFS:
-        Call Topic Transition Agent when the current political topic has been sufficiently explored and
-        you want to move to a new topic within the same phase — but only after at least 2 substantive
-        exchanges on that topic. Call Phase Transition Agent when you believe the goals of the current
-        phase are fully met — but only after the phase has been genuinely explored, not after a single
-        on-topic answer.
+        Phase 4 — Tensions and contradictions (3 to 4 exchanges):
+        Look at the pre-survey for places where their specific positions don't quite match their
+        identity label. Ask about the clearest one you can find. If everything lines up, ask where
+        they might see themselves as different from others with the same label.
+        End this phase by asking how they see themselves in the bigger picture of US politics today.
+        Only hand off after at least 3 exchanges AND after they've answered that broader question.
 
-        When you receive a handoff back from either transition agent, they will suggest a bridging
-        question — use it as your next question exactly as suggested or adapt it slightly. Never
-        announce to the respondent that you are transitioning, moving on, or shifting topics. The
-        conversation must always feel like a natural, flowing dialogue.
+        WHEN TO HAND OFF:
+        Hand off to Topic Transition Agent when the current issue/topic has been well covered (at
+        least 2 exchanges on it) and you want to move to a new one within the same phase.
+        Hand off to Phase Transition Agent when you genuinely believe ALL the goals for the current
+        phase have been met AND the minimum number of exchanges has happened.
+        Do NOT hand off after just one or two answers. Stay in the phase until it's truly done.
 
-        CRITICAL — OUTPUT ONLY YOUR REPLY TO THE RESPONDENT: Never output internal reasoning,
-        phase summaries, agent commentary, or anything prefixed with labels like "Phase X goals",
-        "Suggested Bridging Question:", "I will now advance", or similar. If any such text appears
-        in a handoff message you receive, ignore it entirely. Your response is always and only
-        what you say directly to the respondent.
+        NATURALNESS:
+        - After they answer, briefly reflect back one specific thing they said before asking your
+          next question. One short sentence — just enough to show you heard them.
+          Example: "That makes sense given what you said about [topic] — [next question]?"
+        - Vary how you start questions. Don't begin every question the same way. Mix it up:
+          "What do you think about...", "How does that fit with...", "Where does that come from
+          for you?", "Does that feel like it connects to...", "I'm curious — do you think..."
+        - If they say something personal or emotional, acknowledge it briefly before moving on.
 
-        CRITICAL: Never say anything like "moving on to the next topic", "let's shift to", "turning to
-        another area", "for the next part of our conversation", or any phrase that signals a structured
-        transition. Simply ask the next question as if it arose naturally from the conversation.
-
-        NATURALNESS — apply throughout:
-        - After the respondent gives a substantive answer, briefly echo ONE specific thing they said
-          before asking your next question. One sentence maximum — make it feel heard, not repeated.
-          Example: "That idea of personal responsibility really comes through in how you're describing
-          it — [next question]."
-        - Vary your question openers across the conversation. Do not start consecutive questions with
-          the same phrase. Mix in: "What draws you to...", "How do you think about...", "Where does
-          that come from for you?", "Does that feel consistent with...?", "I'm curious whether...",
-          "How does that sit with you when...".
-        - If the respondent shares something emotionally resonant or personal, acknowledge it in one
-          warm sentence before continuing. Keep the interview human, not clinical.
-
-        METADATA USAGE — CRITICAL FOR PHASES 3 AND 4:
-        Before every question in phases 3 and 4, identify a SPECIFIC issue position from the pre-survey
-        relevant to what the respondent just said. Build your question around that position — make it
-        feel personal to this respondent, not generic. Rotate through their issues; do not return to
-        one already explored. In phase 4, actively look for the sharpest tension between their ideology
-        score and a specific issue position and lead with that.
-
-        INTERVIEW GUIDELINES:
-        Ask only one question at a time. Ask open-ended questions, not yes/no questions. Remain
-        non-judgmental and focus on understanding, not debating. Always lead with a question — do not
-        wait for the respondent to start. Use the pre-survey metadata to ask informed, specific
-        questions that draw on their stated issue positions. Never mention phases, transitions, or
-        agent names to the respondent. Conclude after 15 to 20 questions or if the respondent wishes
-        to end early.
+        IMPORTANT RULES:
+        - Never tell them you are transitioning, moving to a new phase, or switching topics.
+        - Never mention phases, agents, or the interview structure.
+        - Always ask open-ended questions, not yes/no questions.
+        - Stay warm, curious, and non-judgmental throughout.
+        - Never output internal reasoning or phase notes — only speak directly to the respondent.
+        - Wrap up after about 15 to 20 questions total, or sooner if they want to stop.
         """
     )
 
     def advance_phase_and_relay(ctx: RunContextWrapper) -> None:
         advance_phase(ctx)
 
-    # Custom Handoff subclass that injects the actual respondent message instead
-    # of the SDK default {"assistant": "Agent Name"} which causes empty output.
     def _make_relay_handoff(target_agent, on_handoff_fn=None):
-        # Build a normal handoff then monkey-patch get_transfer_message on the instance.
-        # This avoids subclassing Handoff entirely, which breaks across SDK versions
-        # that have different dataclass fields (e.g. _agent_ref in some deployments).
         h = handoff(target_agent, on_handoff=on_handoff_fn) if on_handoff_fn else handoff(target_agent)
         import types as _types
         h.get_transfer_message = _types.MethodType(
@@ -435,14 +392,13 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
     )
     topic_transition_agent.handoffs.append(_make_relay_handoff(interview_agent))
 
-    # guardrail_agent removed — built fresh per request via _build_guardrail_agent()
     return {
         "interview_agent":        interview_agent,
         "phase_transition_agent": phase_transition_agent,
         "topic_transition_agent": topic_transition_agent,
         "summary_agent":          summary_agent,
         "end_interview_agent":    end_interview_agent,
-        "_last_respondent_msg":   last_respondent_msg,  # mutable dict, updated each turn
+        "_last_respondent_msg":   last_respondent_msg,
     }
 
 
@@ -462,7 +418,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Political Belief Systems Interview Agent API",
-    version="4.13.0",
+    version="4.14.0",
     lifespan=lifespan
 )
 
@@ -504,7 +460,6 @@ async def chat_endpoint(request: InterviewRequest):
     is_kickoff    = request.message.lower().strip() in {"hello", "hi", "start", "begin"}
 
     if not is_kickoff:
-        # Built fresh each request: phase-aware, gpt-4o-mini, stateless
         guardrail_agent  = _build_guardrail_agent(current_phase)
         guardrail_result = await Runner.run(
             guardrail_agent,
@@ -520,9 +475,9 @@ async def chat_endpoint(request: InterviewRequest):
                 agents["interview_agent"],
                 f"""The respondent seems confused or has asked for clarification about your last
                 question. Do NOT move to a new topic. Instead:
-                1. Briefly clarify what you were asking in simple, accessible language (1 sentence).
-                2. Re-ask the same question in a slightly different, clearer way.
-                Keep the tone warm and reassuring — make them feel comfortable, not tested.
+                1. Briefly clarify what you were asking in simple, plain language (1 sentence).
+                2. Re-ask the same question in a simpler, clearer way.
+                Keep the tone warm and easy — make them feel comfortable, not tested.
                 Current phase context: {PHASE_GUARDRAIL_CONTEXT.get(current_phase, '')}
 
                 Their response was: {request.message}""",
@@ -571,10 +526,10 @@ async def chat_endpoint(request: InterviewRequest):
             f"  - {k}: {v}" for k, v in meta["user_metadata"].items()
         ) or "  (No pre-survey data available)"
 
-        agent_input = f"""Begin the interview in Phase 1 (Introduction). Introduce yourself warmly as
-        an AI Conversation Bot here to learn about the respondent's political views and beliefs. Your
-        opening question should ask about their overall thoughts and feelings toward politics. Ask only this ONE open-ended question to open the
-        conversation.
+        agent_input = f"""Begin the interview in Phase 1 (Opening). Introduce yourself briefly and
+        warmly as an AI here to learn about the respondent's political views. Keep the intro to one
+        or two sentences. Then ask ONE simple, open-ended question about how they generally feel
+        about politics these days. Do not ask more than one question.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
         informed, targeted questions. Reference their specific issue positions and ideology naturally;
@@ -594,16 +549,18 @@ async def chat_endpoint(request: InterviewRequest):
         starting_agent = agents["summary_agent"]
 
     else:
-        # Update the relay message so transition agent handoffs carry the real respondent text
         agents["_last_respondent_msg"]["text"] = request.message
 
         agent_input = f"""Respondent's latest response: {request.message}
 
-        Respond thoughtfully and ask a follow-up question. The pre-survey background shared at the
-        start of this conversation is in your history — use it to inform the direction and depth of
-        your questions. If you have sufficiently explored the current topic, hand off to Topic
-        Transition Agent. If you believe the current phase goals are fully met, hand off to Phase
-        Transition Agent. Ask ONE open-ended question at a time and remain non-judgmental."""
+        Respond in a warm, friendly way and ask one simple follow-up question. Use the pre-survey
+        background from earlier in this conversation to guide what you ask about. Keep your language
+        plain and conversational — no formal or academic phrasing.
+        If you have covered the current topic well (at least 2 exchanges on it), hand off to Topic
+        Transition Agent to move to a new topic within this phase.
+        If you believe ALL the goals for the current phase are fully met AND the minimum number of
+        exchanges has happened, hand off to Phase Transition Agent.
+        Do NOT hand off too early — stay in the phase until it is genuinely complete."""
 
         starting_agent = agents["interview_agent"]
 
@@ -694,7 +651,7 @@ async def health_check():
         "status":          "healthy",
         "message":         "Political Belief Systems Interview Agent API is running",
         "active_sessions": count,
-        "version":         "4.13.0",
+        "version":         "4.14.0",
     }
 
 
