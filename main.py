@@ -418,22 +418,17 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
 
     # Custom Handoff subclass that injects the actual respondent message instead
     # of the SDK default {"assistant": "Agent Name"} which causes empty output.
-    from agents.handoffs import Handoff as _Handoff
-    import dataclasses as _dc
-
-    @_dc.dataclass
-    class _RelayHandoff(_Handoff):
-        def get_transfer_message(self, agent):
-            import json as _json
-            return f"Respondent's latest response: {last_respondent_msg['text']}"
-
     def _make_relay_handoff(target_agent, on_handoff_fn=None):
-        # Build via the normal handoff() then copy only the fields _RelayHandoff declares,
-        # ignoring any extra private fields (e.g. _agent_ref) that may exist in the
-        # installed SDK version but are not dataclass fields on the base class.
+        # Build a normal handoff then monkey-patch get_transfer_message on the instance.
+        # This avoids subclassing Handoff entirely, which breaks across SDK versions
+        # that have different dataclass fields (e.g. _agent_ref in some deployments).
         h = handoff(target_agent, on_handoff=on_handoff_fn) if on_handoff_fn else handoff(target_agent)
-        relay_field_names = {f.name for f in _dc.fields(_RelayHandoff)}
-        return _RelayHandoff(**{f.name: getattr(h, f.name) for f in _dc.fields(h) if f.name in relay_field_names})
+        import types as _types
+        h.get_transfer_message = _types.MethodType(
+            lambda self, agent: f"Respondent's latest response: {last_respondent_msg['text']}",
+            h
+        )
+        return h
 
     phase_transition_agent.handoffs.append(
         _make_relay_handoff(interview_agent, advance_phase_and_relay)
