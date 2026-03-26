@@ -230,16 +230,15 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         conversation history to assess whether the goals of the current phase have been met.
 
         PHASE 1 - INTRODUCTION:
-        Goals: Open warmly and learn the respondent's overall feelings about politics
+        Goals: Open warmly and learn the respondent's overall feelings about politics.
         Transition when: The respondent has shared their general political feelings
-    
         
         PHASE 2 - POLITICAL IDENTITY MEANING:
         Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means
         to them personally.
         Transition when: The respondent has articulated in their own words what their political identity
         represents to them.
-        
+
         PHASE 3 - CONNECTIONS BETWEEN IDENTITY AND ISSUES:
         Goals: Explore how the respondent sees their specific policy stances as flowing from or
         connecting to their broader political identity. You must surface AT LEAST 3 distinct issue
@@ -571,7 +570,7 @@ async def chat_endpoint(request: InterviewRequest):
         agent_input = f"""Begin the interview in Phase 1 (Introduction). Introduce yourself warmly as
         an AI Conversation Bot here to learn about the respondent's political views and beliefs. Your
         opening question should be simple and conversational — ask how they generally feel about
-        politics or their involvement in it. Keep it broad and easy to answer. One question only.
+        politics. Keep it broad and easy to answer. One question only.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
         informed, targeted questions. Reference their specific issue positions and ideology naturally;
@@ -595,19 +594,7 @@ async def chat_endpoint(request: InterviewRequest):
         agents["_last_respondent_msg"]["text"] = request.message
         logger.info(f"[{session_id}] Normal turn — phase={current_phase} msg_preview={request.message[:80]!r}")
 
-        # Detect early-exit intent and route straight to End Interview Agent
-        exit_phrases = ["end the interview", "stop the interview", "end interview",
-                        "i'm done", "im done", "i want to stop", "stop", "quit",
-                        "i don't want to continue", "i dont want to continue", "that's enough",
-                        "thats enough", "end it", "finish", "i want to end"]
-        msg_lower = request.message.lower().strip()
-        if any(phrase in msg_lower for phrase in exit_phrases):
-            logger.info(f"[{session_id}] Early exit detected — routing to End Interview Agent")
-            agent_input = f"""The respondent has asked to end the interview early. Their message: "{request.message}"
-            Thank them warmly and briefly for their time, then end with CONCLUDE_INTERVIEW."""
-            starting_agent = agents["end_interview_agent"]
-        else:
-            agent_input = f"""Respondent's latest response: {request.message}
+        agent_input = f"""Respondent's latest response: {request.message}
 
         Respond thoughtfully and ask a follow-up question. The pre-survey background shared at the
         start of this conversation is in your history — use it to inform the direction and depth of
@@ -615,7 +602,7 @@ async def chat_endpoint(request: InterviewRequest):
         Transition Agent. If you believe the current phase goals are fully met, hand off to Phase
         Transition Agent. Ask ONE open-ended question at a time and remain non-judgmental."""
 
-            starting_agent = agents["interview_agent"]
+        starting_agent = agents["interview_agent"]
 
     logger.info(f"[{session_id}] Starting Runner.run with agent={starting_agent.name} phase={current_phase}")
     result = await Runner.run(
