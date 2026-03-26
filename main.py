@@ -230,14 +230,16 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         conversation history to assess whether the goals of the current phase have been met.
 
         PHASE 1 - INTRODUCTION:
-        Goals: Open warmly and learn the respondent's overall feelings about politics.
-        Transition when: The respondent has shared their general political feelings
-        
+        Goals: Open warmly and learn the respondent's overall feelings about politics and the issues
+        most important to them.
+        Transition when: The respondent has shared their general political feelings and named the issues
+        they care most about.
         PHASE 2 - POLITICAL IDENTITY MEANING:
         Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means
         to them personally — not just a label, but what values and worldview it reflects.
-        Transition when: The respondent has articulated in their own words what their political identity
-        represents to them.
+        Transition when: The respondent has had 2-3 substantive exchanges about their identity,
+        including what it means to them personally and where it comes from or how they'd describe it.
+        A single one-line answer is not sufficient — the phase needs genuine depth.
 
         PHASE 3 - CONNECTIONS BETWEEN IDENTITY AND ISSUES:
         Goals: Explore how the respondent sees their specific policy stances as flowing from or
@@ -333,10 +335,12 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         generally feel about politics. Both the intro and question in one natural opening message.
         Keep this phase brief — 1 to 2 exchanges — before moving on.
 
-        Phase 2 — Political Identity Meaning: Ask what their political identity means to them
-        personally in general terms — values, worldview, how they see themselves. Do NOT reference
-        specific policy issues yet. Keep questions broad: what does it mean to be moderate/liberal/
-        conservative to them as a person? Save specific issue connections for Phase 3.
+        Phase 2 — Political Identity Meaning: Spend exactly 3 exchanges on this phase.
+        Question 1: What does their political identity mean to them personally — values, worldview.
+        Question 2: Where does that identity come from, or how would they describe it to someone else.
+        Question 3: Which issues most shape or influence their political identity.
+        Keep all three questions broad and personal — do not yet ask how specific pre-survey policy
+        positions connect to their identity. Save that for Phase 3.
 
         Phase 3 — Connections Between Identity and Issues: Ask the respondent to reflect on how their
         specific policy positions connect to their broader political identity. You must work through
@@ -569,7 +573,7 @@ async def chat_endpoint(request: InterviewRequest):
         agent_input = f"""Begin the interview in Phase 1 (Introduction). Introduce yourself warmly as
         an AI Conversation Bot here to learn about the respondent's political views and beliefs. Your
         opening question should be simple and conversational — ask how they generally feel about
-        politics. Keep it broad and easy to answer. One question only.
+        politics or their involvement in it. Keep it broad and easy to answer. One question only.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
         informed, targeted questions. Reference their specific issue positions and ideology naturally;
