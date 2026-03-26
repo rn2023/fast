@@ -231,15 +231,8 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         PHASE 1 - INTRODUCTION:
         Goals: Open warmly and learn the respondent's overall feelings about politics and the issues
         most important to them.
-        Transition when: The respondent has shared their general political feelings
-        Phase 1 to Phase 2 bridging question: When transitioning from Phase 1 to Phase 2, the bridging question
-        must connect what the respondent just said about their political feelings to how they see
-        themselves politically. Draw on their ideology score and issue positions from the pre-survey
-        to make it specific — for example, if they identified as conservative and mentioned healthcare,
-        ask something like "You mentioned [what they said] — I'm curious how that connects to how you
-        see yourself politically. Would you describe yourself as conservative, liberal, somewhere in
-        between?" Do not use those exact words; make it feel natural and personal to what they said.
-
+        Transition when: The respondent has shared their general political feelings and named the issues
+        they care most about.
         PHASE 2 - POLITICAL IDENTITY MEANING:
         Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means
         to them personally — not just a label, but what values and worldview it reflects.
@@ -271,12 +264,11 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         If the respondent wants to end early, hand off to End Interview Agent.
         If current phase goals are not yet met, hand off to Political Interview Agent.
 
-        OUTPUT RULE — STRICTLY ENFORCED: When handing off to the Political Interview Agent,
-        your message must be ONLY the last respondent's message verbatim, prefixed with
-        "Respondent's latest response: ". Nothing else — no reasoning, no phase summaries,
-        no suggested questions, no "Based on...", no "I suggest asking:", no markdown.
-        Example: "Respondent's latest response: i try to be in the middle and make my own decisions"
-        The Interview Agent will use this plus the conversation history to compose the next question.
+        YOUR ONLY JOB IS TO CALL A HANDOFF TOOL. Do not write any text. Do not reason out loud.
+        Do not summarize what happened. Do not explain what phase you are in. Do not suggest
+        questions. Your entire response must be a tool call — nothing else. Any text you write
+        before or after the tool call will be shown directly to the respondent as the interviewer's
+        reply, which would be a critical error.
 
         IMPORTANT — PHASE 2 CANNOT BE SKIPPED: Phase 2 goals require the respondent to have been
         directly asked what their political identity label (liberal/moderate/conservative) means to
@@ -312,12 +304,10 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         If the current topic is not yet exhausted, hand off to Political Interview Agent.
         If the overall phase goals appear complete, hand off to Phase Transition Agent.
 
-        OUTPUT RULE — STRICTLY ENFORCED: When handing off to the Political Interview Agent,
-        your message must be ONLY the last respondent's message verbatim, prefixed with
-        "Respondent's latest response: ". Nothing else — no reasoning, no topic summaries,
-        no suggested questions, no markdown.
-        Example: "Respondent's latest response: i try to be in the middle and make my own decisions"
-        The Interview Agent will use this plus the conversation history to compose the next question.
+        YOUR ONLY JOB IS TO CALL A HANDOFF TOOL. Do not write any text. Do not reason out loud.
+        Do not summarize the topic. Do not suggest questions. Your entire response must be a tool
+        call — nothing else. Any text you write will be shown directly to the respondent as the
+        interviewer's reply, which would be a critical error.
         """
     )
 
@@ -342,7 +332,7 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         Phase 1 — Introduction: Open by asking the respondent about their overall thoughts and feelings
         toward politics. Keep this brief — 1 to 2 exchanges — before moving on.
 
-        Phase 2 — Political Identity Meaning: Using their ideology from the pre-survey, ask them
+        Phase 2 — Political Identity Meaning: Using their ideology score from the pre-survey, ask them
         to elaborate on what that identity means to them personally. What does it mean to be a
         liberal, moderate, or conservative in their view?
 
@@ -418,14 +408,13 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
     # Custom Handoff subclass that injects the actual respondent message instead
     # of the SDK default {"assistant": "Agent Name"} which causes empty output.
     def _make_relay_handoff(target_agent, on_handoff_fn=None):
-        # Build a normal handoff then monkey-patch get_transfer_message on the instance.
-        # This avoids subclassing Handoff entirely, which breaks across SDK versions
-        # that have different dataclass fields (e.g. _agent_ref in some deployments).
+        # Build a normal handoff then patch get_transfer_message using object.__setattr__
+        # so it works even on frozen dataclasses (as seen in some deployed SDK versions).
         h = handoff(target_agent, on_handoff=on_handoff_fn) if on_handoff_fn else handoff(target_agent)
-        import types as _types
-        h.get_transfer_message = _types.MethodType(
-            lambda self, agent: f"Respondent's latest response: {last_respondent_msg['text']}",
-            h
+        object.__setattr__(
+            h,
+            'get_transfer_message',
+            lambda agent: f"Respondent's latest response: {last_respondent_msg['text']}"
         )
         return h
 
@@ -572,8 +561,8 @@ async def chat_endpoint(request: InterviewRequest):
 
         agent_input = f"""Begin the interview in Phase 1 (Introduction). Introduce yourself warmly as
         an AI Conversation Bot here to learn about the respondent's political views and beliefs. Your
-        opening question should ask about their overall thoughts and feelings toward politics. Ask only this ONE open-ended question to open the
-        conversation.
+        opening question should be simple and conversational — ask how they generally feel about
+        politics or their involvement in it. Keep it broad and easy to answer. One question only.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
         informed, targeted questions. Reference their specific issue positions and ideology naturally;
@@ -615,6 +604,19 @@ async def chat_endpoint(request: InterviewRequest):
 
     updated_meta  = _load_meta(session_id)
     current_phase = updated_meta["interview_phase"] if updated_meta else meta["interview_phase"]
+
+    # If a transition agent ended up as the last agent, its reasoning text leaked
+    # into final_output. Re-run the interview agent directly so the respondent
+    # always gets a clean reply from the interview agent only.
+    last_agent_name = getattr(result.last_agent, "name", "")
+    if last_agent_name in ("Phase Transition Agent", "Topic Transition Agent"):
+        logger.warning(f"Transition agent leaked as last_agent for session {session_id}, re-running interview agent")
+        rerun_result = await Runner.run(
+            agents["interview_agent"],
+            f"Respondent's latest response: {request.message}",
+            session=sdk_session
+        )
+        response_content = rerun_result.final_output
 
     end_signal = None
     if "CONCLUDE_INTERVIEW" in response_content:
