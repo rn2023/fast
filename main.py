@@ -230,10 +230,9 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         conversation history to assess whether the goals of the current phase have been met.
 
         PHASE 1 - INTRODUCTION:
-        Goals: Open warmly and learn the respondent's overall feelings about politics and the issues
-        most important to them.
-        Transition when: The respondent has shared their general political feelings and named the issues
-        they care most about.
+        Goals: Open warmly and learn the respondent's overall feelings about politics.
+        Transition when: The respondent has shared their general political feelings.
+
         PHASE 2 - POLITICAL IDENTITY MEANING:
         Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means
         to them personally — not just a label, but what values and worldview it reflects.
@@ -573,7 +572,7 @@ async def chat_endpoint(request: InterviewRequest):
         agent_input = f"""Begin the interview in Phase 1 (Introduction). Introduce yourself warmly as
         an AI Conversation Bot here to learn about the respondent's political views and beliefs. Your
         opening question should be simple and conversational — ask how they generally feel about
-        politics or their involvement in it. Keep it broad and easy to answer. One question only.
+        politics. Keep it broad and easy to answer. One question only.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
         informed, targeted questions. Reference their specific issue positions and ideology naturally;
