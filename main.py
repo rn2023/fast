@@ -84,6 +84,7 @@ def _delete_meta(session_id: str):
 
 
 _agent_cache: Dict[str, Dict[str, Agent]] = {}
+_redirect_streaks: Dict[str, int] = {}   # session_id → consecutive REDIRECT count
 
 # Phase-aware context for guardrail — injected at call time so CLARIFY/REDIRECT
 # decisions are grounded in what the interview is actually asking about right now.
@@ -234,10 +235,11 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         Transition when: The respondent has shared their general political feelings
         
         PHASE 2 - POLITICAL IDENTITY MEANING:
-        Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means
-        to them personally.
-        Transition when: The respondent has articulated in their own words what their political identity
-        represents to them.
+        Goals: Cover three questions — (1) what their political identity label means to them personally,
+        (2) how their most-important pre-survey issue(s) connect to their ideology and self-description
+        as liberal/moderate/conservative, and (3) whether they fit the group norms of their political
+        identity group.
+        Transition when: All three questions have received substantive answers.
 
         PHASE 3 - CONNECTIONS BETWEEN IDENTITY AND ISSUES:
         Goals: Explore how the respondent sees their specific policy stances as flowing from or
@@ -270,11 +272,10 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         before or after the tool call will be shown directly to the respondent as the interviewer's
         reply, which would be a critical error.
 
-        IMPORTANT — PHASE 2 CANNOT BE SKIPPED: Phase 2 goals require the respondent to have been
-        directly asked what their political identity label (liberal/moderate/conservative) means to
-        them personally, AND to have given a substantive answer about their values or worldview —
-        not just a passing remark made while answering a Phase 1 question. If Phase 2 has not been
-        explicitly explored with at least one dedicated exchange, do not transition past it.
+        IMPORTANT — PHASE 2 CANNOT BE SKIPPED AND REQUIRES THREE QUESTIONS: Phase 2 goals require
+        all three dedicated exchanges — (1) identity meaning, (2) key issues + ideology connection,
+        (3) group norm fit — not just a passing remark in Phase 1. If any of the three have not been
+        asked and answered substantively, do not transition past Phase 2.
         """
     )
 
@@ -329,15 +330,28 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
 
         THE INTERVIEW HAS FOUR PHASES:
 
-        Phase 1 — Introduction: Introduce yourself as an AI conversation agent and ask how they
-        generally feel about politics. Both the intro and question in one natural opening message.
+        Phase 1 — Introduction: Introduce yourself as an AI conversation agent and briefly describe
+        the purpose of the interview. Your opening question must ask specifically about the
+        respondent's current level of engagement with politics — how much they follow, participate in,
+        or think about it day to day. Both the intro and question in one natural opening message.
         Keep this phase brief — 1 to 2 exchanges — before moving on.
 
-        Phase 2 — Political Identity Meaning: Ask what their political identity means to them
-        personally in general terms, asking them specifically about moderate/liberal/
-        conservative that they listed in the pre-survey. Do NOT reference
-        specific policy issues yet. Keep questions broad: what does it mean to be moderate/liberal/
-        conservative to them as a person? Save specific issue connections for Phase 3.
+        Phase 2 — Political Identity Meaning: This phase requires THREE dedicated exchanges:
+
+          Q1 — Identity meaning: Ask what their political identity means to them personally
+          (liberal/moderate/conservative as listed in the pre-survey). Keep it broad — what does
+          that label mean to them as a person? Do NOT reference specific policy issues yet.
+
+          Q2 — Issues and identity: Pull the issue(s) the respondent marked as most important from
+          the pre-survey. Ask them to explain how those issues connect to their political ideology and
+          how they factor into seeing themselves as liberal/moderate/conservative.
+
+          Q3 — Group norms: Ask whether they feel they fit the typical profile or norms of others who
+          share their political identity — do they see themselves as a "typical" member of their group,
+          or do they differ in meaningful ways?
+
+          All three questions must receive substantive answers before this phase is complete.
+          Do NOT move to Phase 3 until all three have been genuinely explored.
 
         Phase 3 — Connections Between Identity and Issues: Ask the respondent to reflect on how their
         specific policy positions connect to their broader political identity. You must work through
@@ -495,9 +509,13 @@ async def chat_endpoint(request: InterviewRequest):
         raise HTTPException(status_code=404, detail="Session not found. It may have been deleted or the server restarted before this session was created.")
 
     agents        = get_or_create_agents(session_id)
+    relay_msg: dict = agents["_last_respondent_msg"]  # type: ignore[assignment]
     sdk_session   = SQLiteSession(session_id, DB_PATH)
     current_phase = meta["interview_phase"]
     is_kickoff    = request.message.lower().strip() in {"hello", "hi", "start", "begin"}
+
+    agent_input    = None
+    starting_agent = None
 
     if not is_kickoff:
         # Built fresh each request: phase-aware, gpt-4o-mini, stateless
@@ -512,28 +530,46 @@ async def chat_endpoint(request: InterviewRequest):
         logger.info(f"[{session_id}] Guardrail [phase {current_phase}] → {guardrail_output!r}")
 
         if guardrail_lower.startswith("clarify"):
-            clarify_result = await Runner.run(
-                agents["interview_agent"],
-                f"""The respondent seems confused or has asked for clarification about your last
+            _redirect_streaks[session_id] = 0
+            relay_msg["text"] = request.message
+            agent_input = f"""The respondent seems confused or has asked for clarification about your last
                 question. Do NOT move to a new topic. Instead:
                 1. Briefly clarify what you were asking in simple, accessible language (1 sentence).
                 2. Re-ask the same question in a slightly different, clearer way.
                 Keep the tone warm and reassuring — make them feel comfortable, not tested.
                 Current phase context: {PHASE_GUARDRAIL_CONTEXT.get(current_phase, '')}
 
-                Their response was: {request.message}""",
-                session=sdk_session
-            )
-            return InterviewResponse(
-                reply=clarify_result.final_output.strip(),
-                session_id=session_id,
-                interview_phase=current_phase
-            )
+                Their response was: {request.message}"""
+            starting_agent = agents["interview_agent"]
 
         elif guardrail_lower.startswith("redirect"):
-            redirect_result = await Runner.run(
-                agents["interview_agent"],
-                f"""The respondent just sent a message that is off-topic or asks about the survey
+            streak = _redirect_streaks.get(session_id, 0) + 1
+            _redirect_streaks[session_id] = streak
+            if streak >= 3:
+                # 3 consecutive redirects — end the interview gracefully
+                _redirect_streaks.pop(session_id, None)
+                logger.info(f"[{session_id}] 3 consecutive redirects — ending interview")
+                end_result = await Runner.run(
+                    agents["end_interview_agent"],
+                    "The respondent has repeatedly gone off-topic. Close the interview warmly.",
+                    session=sdk_session,
+                )
+                end_content = end_result.final_output or ""
+                end_signal_val = None
+                if "CONCLUDE_INTERVIEW" in end_content:
+                    end_signal_val = "conclude"
+                    end_content = end_content.replace("CONCLUDE_INTERVIEW", "").strip()
+                _update_phase(session_id, 6)
+                if session_id in _agent_cache:
+                    del _agent_cache[session_id]
+                return InterviewResponse(
+                    reply=end_content,
+                    session_id=session_id,
+                    interview_phase=6,
+                    end_signal=end_signal_val or "conclude",
+                )
+            relay_msg["text"] = request.message
+            agent_input = f"""The respondent just sent a message that is off-topic or asks about the survey
                 structure rather than engaging with the interview questions. Do NOT answer their
                 off-topic question or acknowledge the survey structure. Instead, write a single,
                 warm sentence that gently acknowledges their comment without engaging with it,
@@ -543,34 +579,34 @@ async def chat_endpoint(request: InterviewRequest):
                 smoothly with curiosity.
                 Current phase context: {PHASE_GUARDRAIL_CONTEXT.get(current_phase, '')}
 
-                Their off-topic message was: {request.message}""",
-                session=sdk_session
-            )
-            return InterviewResponse(
-                reply=redirect_result.final_output.strip(),
-                session_id=session_id,
-                interview_phase=current_phase
-            )
+                Their off-topic message was: {request.message}"""
+            starting_agent = agents["interview_agent"]
 
         elif guardrail_lower.startswith("flag"):
-            reply = guardrail_output.replace("FLAG:", "").replace("flag:", "").strip() or (
-                "Let's keep our conversation respectful. Could you tell me more about your political views?"
-            )
-            return InterviewResponse(
-                reply=reply,
-                session_id=session_id,
-                interview_phase=current_phase
-            )
+            _redirect_streaks[session_id] = 0
+            relay_msg["text"] = request.message
+            agent_input = f"""The respondent's message contained content that needs a gentle redirect.
+                Respond in a single warm sentence that acknowledges you'd like to keep the conversation
+                respectful and constructive, then ask the next natural interview question.
+                Current phase context: {PHASE_GUARDRAIL_CONTEXT.get(current_phase, '')}
+                Their message was: {request.message}"""
+            starting_agent = agents["interview_agent"]
 
-    if is_kickoff:
+        else:  # CLEAR — fall through to normal processing below
+            _redirect_streaks[session_id] = 0
+
+    if agent_input is not None:
+        pass  # guardrail already set agent_input and starting_agent
+    elif is_kickoff:
         metadata_str = "\n".join(
             f"  - {k}: {v}" for k, v in meta["user_metadata"].items()
         ) or "  (No pre-survey data available)"
 
         agent_input = f"""Begin the interview in Phase 1 (Introduction). Introduce yourself warmly as
-        an AI Conversation Bot here to learn about the respondent's political views and beliefs. Your
-        opening question should be simple and conversational — ask how they generally feel about
-        politics. Keep it broad and easy to answer. One question only.
+        an AI Conversation Bot and briefly explain you are here to learn about the respondent's
+        political views and beliefs. Your opening question must ask specifically about their current
+        level of engagement with politics — how much they follow, participate in, or think about
+        politics in their day-to-day life. Keep it broad and conversational. One question only.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
         informed, targeted questions. Reference their specific issue positions and ideology naturally;
@@ -591,7 +627,7 @@ async def chat_endpoint(request: InterviewRequest):
 
     else:
         # Update the relay message so transition agent handoffs carry the real respondent text
-        agents["_last_respondent_msg"]["text"] = request.message
+        relay_msg["text"] = request.message
         logger.info(f"[{session_id}] Normal turn — phase={current_phase} msg_preview={request.message[:80]!r}")
 
         agent_input = f"""Respondent's latest response: {request.message}
@@ -604,6 +640,7 @@ async def chat_endpoint(request: InterviewRequest):
 
         starting_agent = agents["interview_agent"]
 
+    assert starting_agent is not None and agent_input is not None
     logger.info(f"[{session_id}] Starting Runner.run with agent={starting_agent.name} phase={current_phase}")
     result = await Runner.run(
         starting_agent,
@@ -718,3 +755,7 @@ if __name__ == "__main__":
     if not os.getenv("OPENAI_API_KEY"):
         print("Warning: OPENAI_API_KEY environment variable not set")
     uvicorn.run(app, host="localhost", port=8000)
+
+
+
+    
