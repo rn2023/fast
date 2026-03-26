@@ -8,6 +8,7 @@ import os
 import uuid
 import json
 import sqlite3
+import asyncio
 
 from agents import Agent, Runner, handoff, SQLiteSession, RunContextWrapper
 
@@ -229,10 +230,9 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         conversation history to assess whether the goals of the current phase have been met.
 
         PHASE 1 - INTRODUCTION:
-        Goals: Open warmly and learn the respondent's overall feelings about politics and the issues
-        most important to them.
-        Transition when: The respondent has shared their general political feelings and named the issues
-        they care most about.
+        Goals: Open warmly and learn the respondent's overall feelings about politics.
+        Transition when: The respondent has shared their general political feelings
+        
         PHASE 2 - POLITICAL IDENTITY MEANING:
         Goals: Understand what the respondent's political identity (liberal/moderate/conservative) means
         to them personally — not just a label, but what values and worldview it reflects.
@@ -329,12 +329,14 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
 
         THE INTERVIEW HAS FOUR PHASES:
 
-        Phase 1 — Introduction: Open by asking the respondent about their overall thoughts and feelings
-        toward politics. Keep this brief — 1 to 2 exchanges — before moving on.
+        Phase 1 — Introduction: Introduce yourself as an AI conversation agent and ask how they
+        generally feel about politics. Both the intro and question in one natural opening message.
+        Keep this phase brief — 1 to 2 exchanges — before moving on.
 
-        Phase 2 — Political Identity Meaning: Using their ideology score from the pre-survey, ask them
-        to elaborate on what that identity means to them personally. What does it mean to be a
-        liberal, moderate, or conservative in their view?
+        Phase 2 — Political Identity Meaning: Ask what their political identity means to them
+        personally in general terms — values, worldview, how they see themselves. Do NOT reference
+        specific policy issues yet. Keep questions broad: what does it mean to be moderate/liberal/
+        conservative to them as a person? Save specific issue connections for Phase 3.
 
         Phase 3 — Connections Between Identity and Issues: Ask the respondent to reflect on how their
         specific policy positions connect to their broader political identity. You must work through
@@ -349,7 +351,9 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         pre-survey shows support for stricter environmental regulation, ask them to reflect on that
         specifically. If their positions are highly consistent with their identity, ask where they
         might diverge from others who share their label. Close this phase by asking how they see
-        themselves within the broader landscape of US politics.
+        themselves within the broader landscape of US politics. Once the respondent has addressed
+        at least one tension AND answered where they fit in the broader US political landscape,
+        immediately call Phase Transition Agent — do not ask any further questions.
 
         AGENTS AND HANDOFFS:
         Call Topic Transition Agent when the current political topic has been sufficiently explored and
@@ -357,6 +361,9 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         exchanges on that topic. Call Phase Transition Agent when you believe the goals of the current
         phase are fully met — but only after the phase has been genuinely explored, not after a single
         on-topic answer.
+        If at ANY point the respondent indicates they want to stop or end the interview (e.g. "I'm
+        done", "stop", "end", "I don't want to continue", "that's enough"), immediately call Phase
+        Transition Agent so the interview can be concluded gracefully via the Summary and End agents.
 
         When you receive a handoff back from either transition agent, they will suggest a bridging
         question — use it as your next question exactly as suggested or adapt it slightly. Never
@@ -501,7 +508,7 @@ async def chat_endpoint(request: InterviewRequest):
         )
         guardrail_output = guardrail_result.final_output.strip()
         guardrail_lower  = guardrail_output.lower()
-        logger.info(f"Guardrail [phase {current_phase}] → {guardrail_output!r}")
+        logger.info(f"[{session_id}] Guardrail [phase {current_phase}] → {guardrail_output!r}")
 
         if guardrail_lower.startswith("clarify"):
             clarify_result = await Runner.run(
@@ -562,7 +569,7 @@ async def chat_endpoint(request: InterviewRequest):
         agent_input = f"""Begin the interview in Phase 1 (Introduction). Introduce yourself warmly as
         an AI Conversation Bot here to learn about the respondent's political views and beliefs. Your
         opening question should be simple and conversational — ask how they generally feel about
-        politics or their involvement in it. Keep it broad and easy to answer. One question only.
+        politics. Keep it broad and easy to answer. One question only.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
         informed, targeted questions. Reference their specific issue positions and ideology naturally;
@@ -584,6 +591,7 @@ async def chat_endpoint(request: InterviewRequest):
     else:
         # Update the relay message so transition agent handoffs carry the real respondent text
         agents["_last_respondent_msg"]["text"] = request.message
+        logger.info(f"[{session_id}] Normal turn — phase={current_phase} msg_preview={request.message[:80]!r}")
 
         agent_input = f"""Respondent's latest response: {request.message}
 
@@ -595,27 +603,32 @@ async def chat_endpoint(request: InterviewRequest):
 
         starting_agent = agents["interview_agent"]
 
+    logger.info(f"[{session_id}] Starting Runner.run with agent={starting_agent.name} phase={current_phase}")
     result = await Runner.run(
         starting_agent,
         agent_input,
-        session=sdk_session
+        session=sdk_session,
     )
+    logger.info(f"[{session_id}] Runner.run complete — last_agent={getattr(result.last_agent, 'name', '?')} output_len={len(str(result.final_output or ''))}")
     response_content = result.final_output
 
     updated_meta  = _load_meta(session_id)
     current_phase = updated_meta["interview_phase"] if updated_meta else meta["interview_phase"]
+    logger.info(f"[{session_id}] Phase after run={current_phase} final_output_preview={str(response_content or '')[:120]!r}")
 
     # If a transition agent ended up as the last agent, its reasoning text leaked
     # into final_output. Re-run the interview agent directly so the respondent
     # always gets a clean reply from the interview agent only.
     last_agent_name = getattr(result.last_agent, "name", "")
     if last_agent_name in ("Phase Transition Agent", "Topic Transition Agent"):
-        logger.warning(f"Transition agent leaked as last_agent for session {session_id}, re-running interview agent")
+        logger.warning(f"[{session_id}] Transition agent '{last_agent_name}' leaked as last_agent — re-running interview agent")
+        logger.info(f"[{session_id}] Starting rerun Runner.run with agent=Political Interview Agent")
         rerun_result = await Runner.run(
             agents["interview_agent"],
             f"Respondent's latest response: {request.message}",
-            session=sdk_session
+            session=sdk_session,
         )
+        logger.info(f"[{session_id}] Rerun complete — last_agent={getattr(rerun_result.last_agent, 'name', '?')} output_len={len(str(rerun_result.final_output or ''))}")
         response_content = rerun_result.final_output
 
     end_signal = None
