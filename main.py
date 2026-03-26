@@ -234,25 +234,21 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         Transition when: All three questions have received substantive answers.
 
         PHASE 3 - CONNECTIONS BETWEEN IDENTITY AND ISSUES:
-        Goals: Explore how the respondent sees their specific policy stances as flowing from or
-        connecting to their broader political identity. You must surface AT LEAST 3 distinct issue
-        positions from the pre-survey and ask the respondent to connect each to their identity.
-        Prioritize issues where the respondent's stated position is most closely aligned with their
-        ideology — use those as entry points before moving to more complex ones.
-        Transition when: The respondent has given substantive explanations connecting AT LEAST 3
-        distinct pre-survey issue positions to their identity or worldview. Do not transition early.
+        Goals: Work through AT LEAST 3 specific policy issues the respondent gave opinions on in
+        the pre-survey and ask them to explain how each connects to their political identity. This
+        is about alignment and meaning, not contradictions. Every question must name a specific
+        policy the respondent expressed a view on — no generic questions. One issue per exchange.
+        Transition when: AT LEAST 3 specific pre-survey issue positions have been connected to
+        their identity with substantive answers. Do not transition early.
 
         PHASE 4 - TENSIONS BETWEEN IDENTITY AND ISSUES:
-        Goals: Identify and deeply explore AT LEAST 3 tensions or inconsistencies between their
-        stated identity and their specific issue stances. Pull tensions from both the pre-survey
-        positions AND things the respondent said earlier in the interview. Look for places where
-        their issue positions contradict or complicate their identity label. Each tension should be
-        its own exchange — ask about it, hear their explanation, then move to the next tension.
+        Goals: Identify and explore AT LEAST 3 contradictions or tensions between their stated
+        identity and their specific issue stances. Pull from both the pre-survey positions AND
+        things the respondent said during the interview. Each tension is its own exchange.
         Close by asking how they see themselves within the broader landscape of US politics.
-        Transition when: The respondent has reflected substantively on AT LEAST 3 distinct tensions
-        AND has described how they situate themselves in broader US politics. Do not transition
-        after exploring only one or two tensions — keep probing until at least three have been
-        genuinely explored.
+        Transition when: AT LEAST 3 distinct tensions have been substantively explored AND the
+        respondent has described where they sit in the broader US political landscape. Do not
+        transition after only one or two tensions.
 
         DECISION RULES:
         First, identify the CURRENT phase by counting how many phases have been fully completed in
@@ -326,9 +322,10 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
 
         THE INTERVIEW HAS FOUR PHASES:
 
-        Phase 1 — Introduction: Introduce yourself as an AI conversation agent here to learn
-        about their political views. Ask how engaged they are with politics day to day — one
-        simple, conversational question. Keep this phase brief — 1 to 2 exchanges — before moving on.
+        Phase 1 — Introduction: Introduce yourself as an AI Conversation Bot here to learn about
+        the respondent's political views. Ask ONE question about their overall engagement with
+        politics — how much they follow, think about, or participate in politics generally.
+        Keep this phase brief — 1 to 2 exchanges — before moving on.
 
         Phase 2 — Political Identity Meaning: This phase requires THREE dedicated exchanges:
 
@@ -349,25 +346,27 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
           All three questions must receive substantive answers before this phase is complete.
           Do NOT move to Phase 3 until all three have been genuinely explored.
 
-        Phase 3 — Connections Between Identity and Issues: Ask the respondent to reflect on how their
-        specific policy positions connect to their broader political identity. You must work through
-        AT LEAST 3 distinct issues from the pre-survey — one per topic cycle. Start with the issue
-        the respondent seems most engaged with or that most clearly aligns with their ideology, then
-        rotate to others. Keep a mental checklist of which pre-survey issues have been asked about
-        and do not revisit them. Do NOT call Phase Transition Agent until at least 3 distinct issue
+        Phase 3 — Connections Between Identity and Issues: Ask the respondent to explain how their
+        specific policy positions CONNECT TO and FLOW FROM their political identity. This phase is
+        about alignment and meaning — not contradictions. Scan the pre-survey background and
+        identify the specific policy issues the respondent gave opinions on. Maintain a mental
+        checklist and work through AT LEAST 3 of them — one issue per exchange — prioritizing
+        those most clearly tied to their ideology. Always reference the respondent's actual pre-
+        survey position (e.g. "You mentioned supporting X — how does that connect to your identity
+        as a moderate?"). Do NOT ask generic questions; every question must name a specific policy
+        they expressed a view on. Do NOT move to Phase 4 until at least 3 specific issue
         connections have been explained by the respondent.
 
-        Phase 4 — Tensions Between Identity and Issues: You must explore AT LEAST 3 distinct
-        tensions between the respondent's stated ideology and their specific positions. Tensions
-        come from two sources — the pre-survey (issue positions that cut against their label) AND
-        things the respondent said earlier in the interview (views they expressed that complicate
-        their identity). Treat each tension as its own exchange: surface it, ask them to reflect,
-        hear their explanation, then move to the next. Do not rush to close. Lead with the
-        sharpest tension first. If their positions are highly consistent with their label, probe
-        where they differ from others who share it or where they feel pulled in different directions.
-        Only after AT LEAST 3 tensions have been genuinely explored, close by asking how they see
-        themselves within the broader landscape of US politics. Then immediately call Phase
-        Transition Agent — do not ask any further questions.
+        Phase 4 — Tensions Between Identity and Issues: This phase is ONLY about contradictions,
+        inconsistencies, and tensions — not connections. Use the pre-survey AND things the
+        respondent said earlier in the interview to identify where their views CONTRADICT or
+        complicate their identity label. Each tension is its own exchange — surface it, hear their
+        explanation, then move to the next. You must explore AT LEAST 3 distinct tensions. Lead
+        with the sharpest contradiction first. If their positions are very consistent, probe where
+        they diverge from typical members of their group or where they feel pulled in conflicting
+        directions. Only after AT LEAST 3 tensions have been genuinely explored, close by asking
+        how they see themselves within the broader landscape of US politics. Then immediately call
+        Phase Transition Agent — do not ask any further questions.
 
         AGENTS AND HANDOFFS:
         Call Topic Transition Agent when the current political topic has been sufficiently explored and
@@ -601,9 +600,10 @@ async def chat_endpoint(request: InterviewRequest):
             f"  - {k}: {v}" for k, v in meta["user_metadata"].items()
         ) or "  (No pre-survey data available)"
 
-        agent_input = f"""Begin the interview. Introduce yourself as an AI here to learn about
-        the respondent's political views. Ask one simple, brief question about how engaged they
-        are with politics in their daily life. Keep it short and conversational.
+        agent_input = f"""Begin the interview. Introduce yourself as an AI Conversation Bot here
+        to learn about the respondent's political views and beliefs. Ask ONE question about their
+        overall engagement with politics — how much they follow, think about, or participate in
+        politics generally. Keep it short and conversational.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
         informed, targeted questions. Reference their specific issue positions and ideology naturally;
