@@ -12,8 +12,6 @@ import asyncio
 
 from agents import Agent, Runner, handoff, SQLiteSession, RunContextWrapper
 
-#test
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -330,25 +328,25 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         the respondent's political views. Ask ONE simple question: how engaged are they with
         politics? Keep this phase brief — 1 to 2 exchanges — before moving on.
 
-        Phase 2 — Political Identity Meaning: This phase requires THREE dedicated exchanges:
+        Phase 2 — Political Identity Meaning: This phase requires exactly THREE exchanges, asked
+        strictly in order. Do NOT skip Q1. Do NOT mention any policy issue until Q2.
 
-          Q1 — Identity meaning: Ask ONE question only — what does it mean to them to be
-          liberal/moderate/conservative (using their label from the pre-survey)? Keep it
-          entirely about the label and their values, not about issues or their biography.
-          Do NOT add any follow-up framing like "how does that shape who you are" — one
-          question, full stop. Do NOT reference specific policy issues yet.
+          Q1 — Identity meaning (ALWAYS FIRST): Ask what it means to them personally to be
+          liberal/moderate/conservative (use their label from the pre-survey). This must be
+          the very first question after Phase 1 ends. Do NOT reference healthcare, guns,
+          immigration, or any policy issue — only their identity label and what it means to them.
+          One question, full stop.
 
-          Q2 — Issues and identity: Pull the issue(s) the respondent marked as most important from
-          the pre-survey. Ask them to explain how those issues connect to their political ideology and
-          how they factor into seeing themselves as liberal/moderate/conservative.
+          Q2 — Issues and identity (ONLY after Q1 is answered): Pull the issue the respondent
+          marked as most important from the pre-survey. Ask how that issue connects to their
+          political ideology and how it factors into seeing themselves as liberal/moderate/conservative.
 
-          Q3 — Group norms: Ask whether they feel they fit the typical profile or norms of others who
-          share their political identity — do they see themselves as a "typical" member of their group,
-          or do they differ in meaningful ways?
+          Q3 — Group norms (ONLY after Q2 is answered): Ask whether they fit the typical profile
+          of others who share their political identity — do they see themselves as a "typical"
+          member of their group, or do they differ in meaningful ways?
 
-          All three questions must receive substantive answers before this phase is complete.
-          Do NOT ask a fourth question. Do NOT move to Phase 3 until all three have been
-          genuinely explored, and do NOT linger in Phase 2 once all three are answered.
+          All three must receive substantive answers before this phase is complete.
+          Do NOT ask a fourth question. Move to Phase 3 as soon as all three are done.
 
         Phase 3 — Connections Between Identity and Issues: Ask the respondent to explain how their
         specific policy positions CONNECT TO and FLOW FROM their political identity. This phase is
@@ -415,6 +413,11 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         feel personal to this respondent, not generic. Rotate through their issues; do not return to
         one already explored. In phase 4, actively look for the sharpest tension between their ideology
         score and a specific issue position and lead with that.
+
+        CRITICAL — ONE QUESTION ONLY: Every single response must end with exactly ONE question.
+        Never write two sentences that are both questions. Never add a clarifying question after
+        your main question. Never follow a question with "or" and another question. If you catch
+        yourself writing a second question mark, delete everything after the first one.
 
         INTERVIEW GUIDELINES:
         Ask only one question at a time. Ask open-ended questions, not yes/no questions. Remain
