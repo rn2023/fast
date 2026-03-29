@@ -133,7 +133,7 @@ def _build_guardrail_agent(phase: int) -> Agent:
         - Questions or comments about the survey structure, question design, research purpose,
           who built this tool, how the AI works, or how this interview is conducted
         - Any attempt to discuss the phases, transitions, or logic of the interview itself
-        - Completely off-topic personal conversation unrelated to politics (weather, unrelated
+        - Exremely off-topic personal conversation unrelated to politics (weather, unrelated
           stories, casual chatter with no political relevance)
         - Requests to skip questions or change the subject without genuine political content
         Note: frustration WITH politics or politicians is NOT a redirect — it is on-topic.
@@ -234,12 +234,14 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         Transition when: All three questions have received substantive answers.
 
         PHASE 3 - CONNECTIONS BETWEEN IDENTITY AND ISSUES:
-        Goals: Work through AT LEAST 3 specific policy issues the respondent gave opinions on in
-        the pre-survey and ask them to explain how each connects to their political identity. This
-        is about alignment and meaning, not contradictions. Every question must name a specific
-        policy the respondent expressed a view on — no generic questions. One issue per exchange.
-        Transition when: AT LEAST 3 specific pre-survey issue positions have been connected to
-        their identity with substantive answers. Do not transition early.
+        Goals: Start with the respondent's most-important pre-survey issue, citing their specific
+        policy position on it. Then work through AT LEAST 3 more specific policy positions from
+        the pre-survey, one per exchange. Every question must name a specific pre-survey policy
+        the respondent expressed a view on — no generic questions. This is about alignment and
+        meaning, not contradictions.
+        Transition when: The most-important issue has been covered AND AT LEAST 3 additional
+        specific pre-survey policy positions have been connected to their identity. Do not
+        transition early.
 
         PHASE 4 - TENSIONS BETWEEN IDENTITY AND ISSUES:
         Goals: Identify and explore AT LEAST 3 contradictions or tensions between their stated
@@ -323,9 +325,8 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         THE INTERVIEW HAS FOUR PHASES:
 
         Phase 1 — Introduction: Introduce yourself as an AI Conversation Bot here to learn about
-        the respondent's political views. Ask ONE question about their overall engagement with
-        politics — how much they follow, think about, or participate in politics generally.
-        Keep this phase brief — 1 to 2 exchanges — before moving on.
+        the respondent's political views. Ask ONE simple question: how engaged are they with
+        politics? Keep this phase brief — 1 to 2 exchanges — before moving on.
 
         Phase 2 — Political Identity Meaning: This phase requires THREE dedicated exchanges:
 
@@ -344,18 +345,19 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
           or do they differ in meaningful ways?
 
           All three questions must receive substantive answers before this phase is complete.
-          Do NOT move to Phase 3 until all three have been genuinely explored.
+          Do NOT ask a fourth question. Do NOT move to Phase 3 until all three have been
+          genuinely explored, and do NOT linger in Phase 2 once all three are answered.
 
         Phase 3 — Connections Between Identity and Issues: Ask the respondent to explain how their
         specific policy positions CONNECT TO and FLOW FROM their political identity. This phase is
-        about alignment and meaning — not contradictions. Scan the pre-survey background and
-        identify the specific policy issues the respondent gave opinions on. Maintain a mental
-        checklist and work through AT LEAST 3 of them — one issue per exchange — prioritizing
-        those most clearly tied to their ideology. Always reference the respondent's actual pre-
-        survey position (e.g. "You mentioned supporting X — how does that connect to your identity
-        as a moderate?"). Do NOT ask generic questions; every question must name a specific policy
-        they expressed a view on. Do NOT move to Phase 4 until at least 3 specific issue
-        connections have been explained by the respondent.
+        about alignment and meaning — not contradictions. Before asking the first question, look
+        up the issue the respondent marked as most important in the pre-survey metadata, then find
+        their specific policy stance on that issue from the metadata. Your FIRST question MUST
+        cite that exact policy by name as it appears in the pre-survey — do not ask about the
+        issue category in general. Then maintain a
+        mental checklist and work through AT LEAST 3 more distinct pre-survey policy positions —
+        one per exchange, each named specifically. Do NOT ask generic questions. Do NOT move to
+        Phase 4 until at least 3 specific policy connections have been explained beyond the first.
 
         Phase 4 — Tensions Between Identity and Issues: This phase is ONLY about contradictions,
         inconsistencies, and tensions — not connections. Use the pre-survey AND things the
