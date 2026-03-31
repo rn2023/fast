@@ -9,6 +9,7 @@ import uuid
 import json
 import sqlite3
 import asyncio
+import re
 
 from agents import Agent, Runner, handoff, SQLiteSession, RunContextWrapper
 
@@ -85,6 +86,13 @@ def _delete_meta(session_id: str):
 
 _agent_cache: Dict[str, Dict[str, Agent]] = {}
 _redirect_streaks: Dict[str, int] = {}   # session_id → consecutive REDIRECT count
+
+# Detects when a transition agent leaked its own name as the response text instead of
+# making a silent tool call.  Catches both "Phase Transition Agent" and "[Phase Transition Agent]".
+_LEAKED_AGENT_RE = re.compile(
+    r'^\[?(Phase Transition Agent|Topic Transition Agent)\]?\s*$',
+    re.IGNORECASE,
+)
 
 # Phase-aware context for guardrail — injected at call time so CLARIFY/REDIRECT
 # decisions are grounded in what the interview is actually asking about right now.
@@ -206,8 +214,11 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         2. Immediately hand off to the End Interview Agent. Do not ask more questions.
 
         HOW TO KNOW WHICH JOB TO DO:
-        - Most recent message is a handoff/system message asking you to summarize → Job 1.
-        - Most recent message is a respondent reply to your summary question → Job 2, hand off immediately.
+        - Your input contains "FIRST ACTIVATION" or asks you to "present your summary" → Job 1.
+          CRITICAL for Job 1: output your summary text and reaction question, then STOP.
+          Do NOT call any handoff tool. Do NOT hand off to End Interview Agent. Just output text.
+        - Your input contains "respondent has just reacted" or "reacted to your summary" → Job 2.
+          Acknowledge their reaction briefly, then immediately hand off to End Interview Agent.
         """
     )
 
@@ -348,16 +359,24 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
 
         Phase 3 — Connections Between Identity and Issues: Ask the respondent to explain how their
         specific policy positions CONNECT TO and FLOW FROM their political identity. This phase is
-        about alignment and meaning — not contradictions. Before asking the first question, look
-        up the issue the respondent marked as most important in the pre-survey metadata, then find
-        their specific policy stance on that issue from the metadata. Your FIRST question MUST
-        cite that exact policy by name as it appears in the pre-survey — do not ask about the
-        issue category in general. Then maintain a
-        mental checklist and work through AT LEAST 3 more distinct pre-survey policy positions —
-        one per exchange, each named specifically. NEVER bundle two positions together in one
-        question (e.g. do NOT say "you support both X and Y"). Ask about ONE policy at a time,
-        framed as connection — not conflict or tension. Do NOT ask generic questions. Do NOT move
-        to Phase 4 until at least 3 specific policy connections have been explained beyond the first.
+        EXCLUSIVELY about alignment and meaning — not contradictions, not tensions, not anything
+        that requires two positions to be weighed against each other. Before asking the first
+        question, look up the issue the respondent marked as most important in the pre-survey
+        metadata, then find their specific policy stance on that issue. Your FIRST question MUST
+        cite that exact policy by name — do not ask about the issue category in general. Then
+        maintain a mental checklist and work through AT LEAST 3 more distinct pre-survey policy
+        positions — one per exchange, each named specifically. NEVER bundle two positions together
+        in one question (do NOT say "you support both X and Y"). Ask about ONE policy at a time.
+
+        STRICT PHASE 3 LANGUAGE RULES — VIOLATION BREAKS THE STUDY:
+        NEVER use any of these words or phrases in Phase 3: "tension", "reconcile", "contradict",
+        "conflict", "inconsistency", "on the other hand", "both X and Y", "how do you balance",
+        "how do you square". If you catch yourself writing any of these, you are asking a Phase 4
+        question by mistake — stop, rephrase as a simple connection question, or call Phase
+        Transition Agent to advance the phase first. Phase 3 questions have positive, connecting
+        frames: "How does X connect to...?", "Where does your support for X come from?", "How does
+        X fit with how you see yourself as [label]?". Do NOT move to Phase 4 until at least 3
+        specific policy connections have been explained beyond the first.
 
         Phase 4 — Tensions Between Identity and Issues: This phase is ONLY about contradictions,
         inconsistencies, and tensions — not connections. Use the pre-survey AND things the
@@ -371,6 +390,14 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         answers that question, your ONLY action is to call Phase Transition Agent via tool call.
         Do NOT write any closing message, thank you, or summary — the Summary Agent and End
         Interview Agent handle that. Any text you write instead of the tool call is a critical error.
+
+        PHASE 4 ENTRY — NATURAL BRIDGE: Your very first Phase 4 question must open with a warm,
+        natural pivot that briefly references a theme from what they shared (e.g., "A lot of what
+        you've described sounds like it flows from a core belief in X — I want to explore a couple
+        spots where things feel a bit more complicated..."). Do NOT announce a new phase, do NOT
+        say "now I want to look at tensions", and do NOT use the word "tension" in the opening
+        sentence. The bridge should feel like a natural deepening of the conversation, not a hard
+        reset. After the bridge sentence, ask your first tension question as normal.
 
         AGENTS AND HANDOFFS:
         Call Topic Transition Agent when the current political topic has been sufficiently explored and
@@ -661,8 +688,17 @@ async def chat_endpoint(request: InterviewRequest):
 
     # If a transition agent ended up as the last agent, its reasoning text leaked
     # into final_output. Route correctly based on phase.
+    # Also catches the case where Phase Transition Agent made a handoff tool call to
+    # Summary Agent (enter_summary_reaction fired) but Summary Agent produced empty
+    # output — the SDK preserves the Phase Transition Agent's leaked text as final_output
+    # and last_agent becomes Summary Agent, bypassing the name check.
     last_agent_name = getattr(result.last_agent, "name", "")
-    if last_agent_name in ("Phase Transition Agent", "Topic Transition Agent"):
+    _resp_stripped   = str(response_content or "").strip()
+    _is_transition_leak = (
+        last_agent_name in ("Phase Transition Agent", "Topic Transition Agent")
+        or bool(_LEAKED_AGENT_RE.match(_resp_stripped))
+    )
+    if _is_transition_leak:
         logger.warning(f"[{session_id}] Transition agent '{last_agent_name}' leaked as last_agent — phase={current_phase}")
         if current_phase >= 4:
             # Phase 4 complete — route to Summary Agent to present summary and close
@@ -671,11 +707,24 @@ async def chat_endpoint(request: InterviewRequest):
             current_phase = 5
             summary_result = await Runner.run(
                 agents["summary_agent"],
-                "The interview's substantive phases are complete. Please present your summary.",
+                (
+                    "FIRST ACTIVATION — JOB 1: The interview's substantive phases are now complete. "
+                    "Present a comprehensive summary of the respondent's political views, then ask "
+                    "ONE reaction question. You MUST output your summary as text and STOP — do NOT "
+                    "hand off to the End Interview Agent yet. Wait for the respondent's reply first."
+                ),
                 session=sdk_session,
             )
-            logger.info(f"[{session_id}] Summary Agent done — last_agent={getattr(summary_result.last_agent, 'name', '?')}")
+            logger.info(f"[{session_id}] Summary Agent done — last_agent={getattr(summary_result.last_agent, 'name', '?')} output_len={len(str(summary_result.final_output or ''))}")
             response_content = summary_result.final_output
+            # Safety: if summary_agent still produced nothing, return a graceful fallback
+            if not str(response_content or "").strip():
+                logger.error(f"[{session_id}] Summary Agent returned empty output — using fallback")
+                response_content = (
+                    "I really appreciate you sharing your views with me today. "
+                    "How does this conversation feel to you — does it capture where you stand politically, "
+                    "or is there anything you'd push back on or add?"
+                )
         else:
             logger.info(f"[{session_id}] Re-running interview agent (phase {current_phase})")
             rerun_result = await Runner.run(
@@ -687,6 +736,7 @@ async def chat_endpoint(request: InterviewRequest):
             response_content = rerun_result.final_output
 
     end_signal = None
+    response_content = str(response_content or "").strip()
     if "CONCLUDE_INTERVIEW" in response_content:
         end_signal = "conclude"
         response_content = response_content.replace("CONCLUDE_INTERVIEW", "").strip()
