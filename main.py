@@ -260,11 +260,11 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         If the respondent wants to end early, hand off to End Interview Agent.
         If current phase goals are not yet met, hand off to Political Interview Agent.
 
-        YOUR ONLY JOB IS TO CALL A HANDOFF TOOL. Do not write any text. Do not reason out loud.
-        Do not summarize what happened. Do not explain what phase you are in. Do not suggest
-        questions. Your entire response must be a tool call — nothing else. Any text you write
-        before or after the tool call will be shown directly to the respondent as the interviewer's
-        reply, which would be a critical error.
+        YOUR ONLY JOB IS TO CALL A HANDOFF TOOL. Do not write any text whatsoever. Do not write
+        "Transitioning to the next phase", "Please proceed", or anything else. Do not reason out
+        loud. Do not summarize. Do not explain. Your entire response must be a tool call and
+        nothing else. Any text you write will be shown directly to the respondent, which is a
+        critical error that breaks the interview.
 
         IMPORTANT — PHASE 2 CANNOT BE SKIPPED AND REQUIRES THREE QUESTIONS: Phase 2 goals require
         all three dedicated exchanges — (1) identity meaning, (2) key issues + ideology connection,
@@ -660,19 +660,31 @@ async def chat_endpoint(request: InterviewRequest):
     logger.info(f"[{session_id}] Phase after run={current_phase} final_output_preview={str(response_content or '')[:120]!r}")
 
     # If a transition agent ended up as the last agent, its reasoning text leaked
-    # into final_output. Re-run the interview agent directly so the respondent
-    # always gets a clean reply from the interview agent only.
+    # into final_output. Route correctly based on phase.
     last_agent_name = getattr(result.last_agent, "name", "")
     if last_agent_name in ("Phase Transition Agent", "Topic Transition Agent"):
-        logger.warning(f"[{session_id}] Transition agent '{last_agent_name}' leaked as last_agent — re-running interview agent")
-        logger.info(f"[{session_id}] Starting rerun Runner.run with agent=Political Interview Agent")
-        rerun_result = await Runner.run(
-            agents["interview_agent"],
-            f"Respondent's latest response: {request.message}",
-            session=sdk_session,
-        )
-        logger.info(f"[{session_id}] Rerun complete — last_agent={getattr(rerun_result.last_agent, 'name', '?')} output_len={len(str(rerun_result.final_output or ''))}")
-        response_content = rerun_result.final_output
+        logger.warning(f"[{session_id}] Transition agent '{last_agent_name}' leaked as last_agent — phase={current_phase}")
+        if current_phase >= 4:
+            # Phase 4 complete — route to Summary Agent to present summary and close
+            logger.info(f"[{session_id}] Phase 4 done — running Summary Agent")
+            _update_phase(session_id, 5)
+            current_phase = 5
+            summary_result = await Runner.run(
+                agents["summary_agent"],
+                "The interview's substantive phases are complete. Please present your summary.",
+                session=sdk_session,
+            )
+            logger.info(f"[{session_id}] Summary Agent done — last_agent={getattr(summary_result.last_agent, 'name', '?')}")
+            response_content = summary_result.final_output
+        else:
+            logger.info(f"[{session_id}] Re-running interview agent (phase {current_phase})")
+            rerun_result = await Runner.run(
+                agents["interview_agent"],
+                f"Respondent's latest response: {request.message}",
+                session=sdk_session,
+            )
+            logger.info(f"[{session_id}] Rerun complete — last_agent={getattr(rerun_result.last_agent, 'name', '?')}")
+            response_content = rerun_result.final_output
 
     end_signal = None
     if "CONCLUDE_INTERVIEW" in response_content:
