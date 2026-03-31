@@ -147,7 +147,7 @@ def _build_guardrail_agent(phase: int) -> Agent:
     )
 
 
-def create_agents(session_id: str) -> Dict[str, Agent]:
+def create_agents(session_id: str) -> Dict[str, Any]:
 
     # Mutable container so on_handoff callbacks can pass the last respondent
     # message to the interview agent, replacing the SDK's default
@@ -161,26 +161,29 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
             _update_phase(session_id, new_phase)
             logger.info(f"Session {session_id} → phase {new_phase}")
 
-    def mark_complete(ctx: RunContextWrapper) -> None:
-        _update_phase(session_id, 6)
-        logger.info(f"Session {session_id} → complete (phase 6)")
+    def enter_summary(ctx: RunContextWrapper) -> None:
+        _update_phase(session_id, 5)
+        logger.info(f"Session {session_id} → summary (phase 5)")
 
     end_interview_agent = Agent(
         name="End Interview Agent",
         model="gpt-4o",
         instructions="""
-        The interview is complete. Do two things in one response:
+        You handle two scenarios depending on your input:
 
-        1. Present a clear summary of the respondent's political views covering:
-           - Their political identity and what it means to them personally
-           - The connections they drew between their identity and specific policy issues
-           - The tensions or nuances between their worldview and specific positions
+        SCENARIO A — input contains "PRESENT_SUMMARY":
+        Present a clear summary of the respondent's political views covering their identity,
+        the connections they drew to specific policies, and the tensions between their worldview
+        and specific positions. End with ONE reaction question, e.g. "Does that feel like an
+        accurate picture of how you see yourself politically, or is there anything you'd push back on?"
+        Do not close the interview yet.
 
-        2. Thank them warmly for sharing their views.
+        SCENARIO B — input contains "REACTION":
+        Acknowledge their reaction briefly and warmly (1-2 sentences), thank them for their time,
+        then end with 'CONCLUDE_INTERVIEW' on its own line.
 
-        If the respondent wanted to end early, skip the summary and just thank them for their time.
-
-        Always end your response with 'CONCLUDE_INTERVIEW' on its own line.
+        SCENARIO C — input contains "EARLY_EXIT":
+        Thank them warmly for the time they gave, then end with 'CONCLUDE_INTERVIEW' on its own line.
         """
     )
 
@@ -189,7 +192,7 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         model="gpt-4o",
         model_settings=ModelSettings(tool_choice="required"),
         handoffs=[
-            handoff(end_interview_agent, on_handoff=mark_complete),
+            handoff(end_interview_agent, on_handoff=enter_summary),
         ],
         instructions="""
         You evaluate interview progress and determine when to move to the next phase. Analyze the full
@@ -229,7 +232,7 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         First, identify the CURRENT phase by counting how many phases have been fully completed in
         the conversation history. You may only advance ONE phase at a time — never skip a phase.
         If the current phase goals are met, hand off to Political Interview Agent.
-        If in Phase 4 and all goals are met, hand off to End Interview Agent to conclude.
+        If in Phase 4 and all goals are met, hand off to Summary Agent to present a summary.
         If the respondent wants to end early, hand off to End Interview Agent.
         If current phase goals are not yet met, hand off to Political Interview Agent.
 
@@ -348,11 +351,16 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         explanation, then move to the next. You must explore AT LEAST 3 distinct tensions. Lead
         with the sharpest contradiction first. If their positions are very consistent, probe where
         they diverge from typical members of their group or where they feel pulled in conflicting
-        directions. Only after AT LEAST 3 tensions have been genuinely explored, close by asking
-        how they see themselves within the broader landscape of US politics. Once the respondent
-        answers that question, your ONLY action is to call Phase Transition Agent via tool call.
-        Do NOT write any closing message, thank you, or summary — the Summary Agent and End
-        Interview Agent handle that. Any text you write instead of the tool call is a critical error.
+        directions.
+
+        MANDATORY CLOSING QUESTION: After AT LEAST 3 tensions have been genuinely explored AND
+        answered, you MUST ask exactly this as your final question: "How do you see yourself
+        within the broader landscape of US politics?" (or a natural variation of it). You cannot
+        call Phase Transition Agent until the respondent has answered THIS closing question.
+        Do NOT call Phase Transition Agent after the 3rd tension — ask the closing question first,
+        wait for the answer, then call Phase Transition Agent. Any text you write after the
+        respondent answers the closing question is a critical error — your only action is the
+        tool call.
 
         PHASE 4 ENTRY — NATURAL BRIDGE: Your very first Phase 4 question must open with a warm,
         natural pivot that briefly references a theme from what they shared (e.g., "A lot of what
@@ -509,11 +517,12 @@ async def chat_endpoint(request: InterviewRequest):
     sdk_session   = SQLiteSession(session_id, DB_PATH)
     current_phase = meta["interview_phase"]
     is_kickoff    = request.message.lower().strip() in {"hello", "hi", "start", "begin"}
+    is_reaction   = current_phase == 5  # summary reaction turn — skip guardrail
 
     agent_input    = None
     starting_agent = None
 
-    if not is_kickoff:
+    if not is_kickoff and not is_reaction:
         # Built fresh each request: phase-aware, gpt-4o-mini, stateless
         guardrail_agent  = _build_guardrail_agent(current_phase)
         guardrail_result = await Runner.run(
@@ -593,6 +602,10 @@ async def chat_endpoint(request: InterviewRequest):
 
     if agent_input is not None:
         pass  # guardrail already set agent_input and starting_agent
+    elif current_phase == 5:
+        # Summary was presented last turn — route reaction directly to end_interview_agent
+        agent_input = f'The respondent has reacted to the summary: "{request.message}"'
+        starting_agent = agents["end_interview_agent"]
     elif is_kickoff:
         metadata_str = "\n".join(
             f"  - {k}: {v}" for k, v in meta["user_metadata"].items()
