@@ -169,21 +169,23 @@ def create_agents(session_id: str) -> Dict[str, Any]:
         name="End Interview Agent",
         model="gpt-4o",
         instructions="""
-        You handle two scenarios depending on your input:
+        You will be called in one of two ways — read your input carefully:
 
-        SCENARIO A — input contains "PRESENT_SUMMARY":
-        Present a clear summary of the respondent's political views covering their identity,
-        the connections they drew to specific policies, and the tensions between their worldview
-        and specific positions. End with ONE reaction question, e.g. "Does that feel like an
-        accurate picture of how you see yourself politically, or is there anything you'd push back on?"
-        Do not close the interview yet.
+        If your input says "present summary":
+        Summarize the respondent's political views from the conversation covering:
+          - Their political identity and what it means to them
+          - The connections they drew between their identity and specific policies
+          - The tensions between their worldview and specific positions
+        Then ask ONE reaction question: "Does that feel like an accurate picture of how you
+        see yourself politically, or is there anything you'd push back on?"
+        Do NOT include CONCLUDE_INTERVIEW — the interview is not over yet.
 
-        SCENARIO B — input contains "REACTION":
-        Acknowledge their reaction briefly and warmly (1-2 sentences), thank them for their time,
-        then end with 'CONCLUDE_INTERVIEW' on its own line.
+        If your input says "close interview" (with or without a reaction):
+        Acknowledge their reaction briefly if one was given (1-2 sentences), thank them for
+        their participation, then output CONCLUDE_INTERVIEW on its own line.
 
-        SCENARIO C — input contains "EARLY_EXIT":
-        Thank them warmly for the time they gave, then end with 'CONCLUDE_INTERVIEW' on its own line.
+        If your input says "early exit":
+        Thank them warmly for their time, then output CONCLUDE_INTERVIEW on its own line.
         """
     )
 
@@ -232,7 +234,7 @@ def create_agents(session_id: str) -> Dict[str, Any]:
         First, identify the CURRENT phase by counting how many phases have been fully completed in
         the conversation history. You may only advance ONE phase at a time — never skip a phase.
         If the current phase goals are met, hand off to Political Interview Agent.
-        If in Phase 4 and all goals are met, hand off to Summary Agent to present a summary.
+        If in Phase 4 and all goals are met, hand off to End Interview Agent to present a summary.
         If the respondent wants to end early, hand off to End Interview Agent.
         If current phase goals are not yet met, hand off to Political Interview Agent.
 
@@ -450,6 +452,15 @@ def create_agents(session_id: str) -> Dict[str, Any]:
     )
     topic_transition_agent.handoffs.append(_make_relay_handoff(interview_agent))
 
+    # Patch the end_interview_agent handoff so it receives an explicit "present summary"
+    # instruction instead of the SDK's default transfer message.
+    end_handoff = phase_transition_agent.handoffs[0]  # the end_interview_agent handoff
+    object.__setattr__(
+        end_handoff,
+        'get_transfer_message',
+        lambda _: "present summary"
+    )
+
     # guardrail_agent removed — built fresh per request via _build_guardrail_agent()
     return {
         "interview_agent":        interview_agent,
@@ -556,7 +567,7 @@ async def chat_endpoint(request: InterviewRequest):
                 logger.info(f"[{session_id}] 3 consecutive redirects — ending interview")
                 end_result = await Runner.run(
                     agents["end_interview_agent"],
-                    "The respondent has repeatedly gone off-topic. Close the interview warmly.",
+                    "early exit. The respondent repeatedly went off-topic.",
                     session=sdk_session,
                 )
                 end_content = end_result.final_output or ""
@@ -604,7 +615,7 @@ async def chat_endpoint(request: InterviewRequest):
         pass  # guardrail already set agent_input and starting_agent
     elif current_phase == 5:
         # Summary was presented last turn — route reaction directly to end_interview_agent
-        agent_input = f'The respondent has reacted to the summary: "{request.message}"'
+        agent_input = f'close interview. Respondent reaction: "{request.message}"'
         starting_agent = agents["end_interview_agent"]
     elif is_kickoff:
         metadata_str = "\n".join(
@@ -654,6 +665,8 @@ async def chat_endpoint(request: InterviewRequest):
     if "CONCLUDE_INTERVIEW" in response_content:
         end_signal = "conclude"
         response_content = response_content.replace("CONCLUDE_INTERVIEW", "").strip()
+        _update_phase(session_id, 6)
+        current_phase = 6
 
     if current_phase == 6 and session_id in _agent_cache:
         del _agent_cache[session_id]
