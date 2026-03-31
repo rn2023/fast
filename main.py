@@ -331,11 +331,9 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         Phase 2 — Political Identity Meaning: This phase requires exactly THREE exchanges, asked
         strictly in order. Do NOT skip Q1. Do NOT mention any policy issue until Q2.
 
-          Q1 — Identity meaning (ALWAYS FIRST): Ask what it means to them personally to be
-          liberal/moderate/conservative (use their label from the pre-survey). This must be
-          the very first question after Phase 1 ends. Do NOT reference healthcare, guns,
-          immigration, or any policy issue — only their identity label and what it means to them.
-          One question, full stop.
+          Q1 — Identity meaning (ALWAYS FIRST): Ask exactly one question: what does it mean
+          to them to be [their label] — e.g. "What does being a moderate mean to you?" Do not
+          add a second sentence or a follow-up clause. Do NOT reference any policy issue.
 
           Q2 — Issues and identity (ONLY after Q1 is answered): Pull the issue the respondent
           marked as most important from the pre-survey. Ask how that issue connects to their
@@ -356,8 +354,10 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         cite that exact policy by name as it appears in the pre-survey — do not ask about the
         issue category in general. Then maintain a
         mental checklist and work through AT LEAST 3 more distinct pre-survey policy positions —
-        one per exchange, each named specifically. Do NOT ask generic questions. Do NOT move to
-        Phase 4 until at least 3 specific policy connections have been explained beyond the first.
+        one per exchange, each named specifically. NEVER bundle two positions together in one
+        question (e.g. do NOT say "you support both X and Y"). Ask about ONE policy at a time,
+        framed as connection — not conflict or tension. Do NOT ask generic questions. Do NOT move
+        to Phase 4 until at least 3 specific policy connections have been explained beyond the first.
 
         Phase 4 — Tensions Between Identity and Issues: This phase is ONLY about contradictions,
         inconsistencies, and tensions — not connections. Use the pre-survey AND things the
@@ -367,8 +367,10 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         with the sharpest contradiction first. If their positions are very consistent, probe where
         they diverge from typical members of their group or where they feel pulled in conflicting
         directions. Only after AT LEAST 3 tensions have been genuinely explored, close by asking
-        how they see themselves within the broader landscape of US politics. Then immediately call
-        Phase Transition Agent — do not ask any further questions.
+        how they see themselves within the broader landscape of US politics. Once the respondent
+        answers that question, your ONLY action is to call Phase Transition Agent via tool call.
+        Do NOT write any closing message, thank you, or summary — the Summary Agent and End
+        Interview Agent handle that. Any text you write instead of the tool call is a critical error.
 
         AGENTS AND HANDOFFS:
         Call Topic Transition Agent when the current political topic has been sufficiently explored and
@@ -607,10 +609,9 @@ async def chat_endpoint(request: InterviewRequest):
             f"  - {k}: {v}" for k, v in meta["user_metadata"].items()
         ) or "  (No pre-survey data available)"
 
-        agent_input = f"""Begin the interview. Introduce yourself as an AI Conversation Bot here
-        to learn about the respondent's political views and beliefs. Ask ONE question about their
-        overall engagement with politics — how much they follow, think about, or participate in
-        politics generally. Keep it short and conversational.
+        agent_input = f"""Begin the interview. Introduce yourself in one sentence as an AI
+        Conversation Bot here to learn about their political views. Then ask exactly this, word
+        for word: "How engaged are you with politics?" Nothing more.
 
         PRE-SURVEY BACKGROUND ON THIS RESPONDENT — use this throughout the entire interview to ask
         informed, targeted questions. Reference their specific issue positions and ideology naturally;
