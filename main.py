@@ -9,9 +9,8 @@ import uuid
 import json
 import sqlite3
 import asyncio
-import re
 
-from agents import Agent, Runner, handoff, SQLiteSession, RunContextWrapper
+from agents import Agent, Runner, handoff, SQLiteSession, RunContextWrapper, ModelSettings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,13 +85,6 @@ def _delete_meta(session_id: str):
 
 _agent_cache: Dict[str, Dict[str, Agent]] = {}
 _redirect_streaks: Dict[str, int] = {}   # session_id → consecutive REDIRECT count
-
-# Detects when a transition agent leaked its own name as the response text instead of
-# making a silent tool call.  Catches both "Phase Transition Agent" and "[Phase Transition Agent]".
-_LEAKED_AGENT_RE = re.compile(
-    r'^\[?(Phase Transition Agent|Topic Transition Agent)\]?\s*$',
-    re.IGNORECASE,
-)
 
 # Phase-aware context for guardrail — injected at call time so CLARIFY/REDIRECT
 # decisions are grounded in what the interview is actually asking about right now.
@@ -169,10 +161,6 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
             _update_phase(session_id, new_phase)
             logger.info(f"Session {session_id} → phase {new_phase}")
 
-    def enter_summary_reaction(ctx: RunContextWrapper) -> None:
-        _update_phase(session_id, 5)
-        logger.info(f"Session {session_id} → awaiting summary reaction (phase 5)")
-
     def mark_complete(ctx: RunContextWrapper) -> None:
         _update_phase(session_id, 6)
         logger.info(f"Session {session_id} → complete (phase 6)")
@@ -181,52 +169,26 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         name="End Interview Agent",
         model="gpt-4o",
         instructions="""
-        Provide a thoughtful conclusion to the interview and thank the respondent for sharing their
-        political views. Acknowledge the specific insights they shared about their political identity
-        and beliefs throughout the conversation. If the respondent wants to end the interview early,
-        acknowledge that gracefully and thank them for the time they gave.
+        The interview is complete. Do two things in one response:
 
-        Always end your response with 'CONCLUDE_INTERVIEW' to signal the interview is complete.
-        """
-    )
-
-    summary_agent = Agent(
-        name="Summary Agent",
-        model="gpt-4o",
-        handoffs=[handoff(end_interview_agent, on_handoff=mark_complete)],
-        instructions="""
-        You are the Summary Agent. You have two distinct jobs depending on context:
-
-        JOB 1 — PRESENT SUMMARY AND ASK FOR REACTION (when first activated):
-        The interview's substantive phases are complete. Do the following in order:
-        1. Present a clear, comprehensive summary of the respondent's political views covering:
+        1. Present a clear summary of the respondent's political views covering:
            - Their political identity and what it means to them personally
            - The connections they drew between their identity and specific policy issues
-           - Any tensions or nuances between their worldview and their specific issue positions
-        2. Immediately after the summary, ask ONE warm, open-ended question inviting their reaction —
-           for example: "How does that summary land with you — does it feel like an accurate picture
-           of how you see yourself politically, or is there something you'd push back on?"
-        3. Do NOT hand off yet. Stop and wait for the respondent to reply.
+           - The tensions or nuances between their worldview and specific positions
 
-        JOB 2 — RECEIVE REACTION AND CLOSE (when respondent has replied to the summary):
-        You will be called again after the respondent reacts. At this point:
-        1. Acknowledge their reaction briefly and warmly (1 to 2 sentences only).
-        2. Immediately hand off to the End Interview Agent. Do not ask more questions.
+        2. Thank them warmly for sharing their views.
 
-        HOW TO KNOW WHICH JOB TO DO:
-        - Your input contains "FIRST ACTIVATION" or asks you to "present your summary" → Job 1.
-          CRITICAL for Job 1: output your summary text and reaction question, then STOP.
-          Do NOT call any handoff tool. Do NOT hand off to End Interview Agent. Just output text.
-        - Your input contains "respondent has just reacted" or "reacted to your summary" → Job 2.
-          Acknowledge their reaction briefly, then immediately hand off to End Interview Agent.
+        If the respondent wanted to end early, skip the summary and just thank them for their time.
+
+        Always end your response with 'CONCLUDE_INTERVIEW' on its own line.
         """
     )
 
     phase_transition_agent = Agent(
         name="Phase Transition Agent",
         model="gpt-4o",
+        model_settings=ModelSettings(tool_choice="required"),
         handoffs=[
-            handoff(summary_agent, on_handoff=enter_summary_reaction),
             handoff(end_interview_agent, on_handoff=mark_complete),
         ],
         instructions="""
@@ -267,7 +229,7 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         First, identify the CURRENT phase by counting how many phases have been fully completed in
         the conversation history. You may only advance ONE phase at a time — never skip a phase.
         If the current phase goals are met, hand off to Political Interview Agent.
-        If in Phase 4 and all goals are met, hand off to Summary Agent to conclude.
+        If in Phase 4 and all goals are met, hand off to End Interview Agent to conclude.
         If the respondent wants to end early, hand off to End Interview Agent.
         If current phase goals are not yet met, hand off to Political Interview Agent.
 
@@ -287,6 +249,7 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
     topic_transition_agent = Agent(
         name="Topic Transition Agent",
         model="gpt-4o",
+        model_settings=ModelSettings(tool_choice="required"),
         handoffs=[
             handoff(phase_transition_agent),
         ],
@@ -484,7 +447,6 @@ def create_agents(session_id: str) -> Dict[str, Agent]:
         "interview_agent":        interview_agent,
         "phase_transition_agent": phase_transition_agent,
         "topic_transition_agent": topic_transition_agent,
-        "summary_agent":          summary_agent,
         "end_interview_agent":    end_interview_agent,
         "_last_respondent_msg":   last_respondent_msg,  # mutable dict, updated each turn
     }
@@ -647,16 +609,6 @@ async def chat_endpoint(request: InterviewRequest):
 
         starting_agent = agents["interview_agent"]
 
-    elif current_phase == 5:
-        agent_input = f"""The respondent has just reacted to your summary. Here is their response:
-
-        "{request.message}"
-
-        Acknowledge their reaction briefly and warmly (1 to 2 sentences), then immediately hand off
-        to the End Interview Agent to close the interview. Do not ask any more questions."""
-
-        starting_agent = agents["summary_agent"]
-
     else:
         # Update the relay message so transition agent handoffs carry the real respondent text
         relay_msg["text"] = request.message
@@ -679,64 +631,13 @@ async def chat_endpoint(request: InterviewRequest):
         agent_input,
         session=sdk_session,
     )
-    logger.info(f"[{session_id}] Runner.run complete — last_agent={getattr(result.last_agent, 'name', '?')} output_len={len(str(result.final_output or ''))}")
-    response_content = result.final_output
+    logger.info(f"[{session_id}] Runner.run complete — last_agent={getattr(result.last_agent, 'name', '?')}")
+    response_content = str(result.final_output or "").strip()
 
     updated_meta  = _load_meta(session_id)
     current_phase = updated_meta["interview_phase"] if updated_meta else meta["interview_phase"]
-    logger.info(f"[{session_id}] Phase after run={current_phase} final_output_preview={str(response_content or '')[:120]!r}")
-
-    # If a transition agent ended up as the last agent, its reasoning text leaked
-    # into final_output. Route correctly based on phase.
-    # Also catches the case where Phase Transition Agent made a handoff tool call to
-    # Summary Agent (enter_summary_reaction fired) but Summary Agent produced empty
-    # output — the SDK preserves the Phase Transition Agent's leaked text as final_output
-    # and last_agent becomes Summary Agent, bypassing the name check.
-    last_agent_name = getattr(result.last_agent, "name", "")
-    _resp_stripped   = str(response_content or "").strip()
-    _is_transition_leak = (
-        last_agent_name in ("Phase Transition Agent", "Topic Transition Agent")
-        or bool(_LEAKED_AGENT_RE.match(_resp_stripped))
-    )
-    if _is_transition_leak:
-        logger.warning(f"[{session_id}] Transition agent '{last_agent_name}' leaked as last_agent — phase={current_phase}")
-        if current_phase >= 4:
-            # Phase 4 complete — route to Summary Agent to present summary and close
-            logger.info(f"[{session_id}] Phase 4 done — running Summary Agent")
-            _update_phase(session_id, 5)
-            current_phase = 5
-            summary_result = await Runner.run(
-                agents["summary_agent"],
-                (
-                    "FIRST ACTIVATION — JOB 1: The interview's substantive phases are now complete. "
-                    "Present a comprehensive summary of the respondent's political views, then ask "
-                    "ONE reaction question. You MUST output your summary as text and STOP — do NOT "
-                    "hand off to the End Interview Agent yet. Wait for the respondent's reply first."
-                ),
-                session=sdk_session,
-            )
-            logger.info(f"[{session_id}] Summary Agent done — last_agent={getattr(summary_result.last_agent, 'name', '?')} output_len={len(str(summary_result.final_output or ''))}")
-            response_content = summary_result.final_output
-            # Safety: if summary_agent still produced nothing, return a graceful fallback
-            if not str(response_content or "").strip():
-                logger.error(f"[{session_id}] Summary Agent returned empty output — using fallback")
-                response_content = (
-                    "I really appreciate you sharing your views with me today. "
-                    "How does this conversation feel to you — does it capture where you stand politically, "
-                    "or is there anything you'd push back on or add?"
-                )
-        else:
-            logger.info(f"[{session_id}] Re-running interview agent (phase {current_phase})")
-            rerun_result = await Runner.run(
-                agents["interview_agent"],
-                f"Respondent's latest response: {request.message}",
-                session=sdk_session,
-            )
-            logger.info(f"[{session_id}] Rerun complete — last_agent={getattr(rerun_result.last_agent, 'name', '?')}")
-            response_content = rerun_result.final_output
 
     end_signal = None
-    response_content = str(response_content or "").strip()
     if "CONCLUDE_INTERVIEW" in response_content:
         end_signal = "conclude"
         response_content = response_content.replace("CONCLUDE_INTERVIEW", "").strip()
