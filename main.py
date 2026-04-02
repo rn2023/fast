@@ -117,16 +117,13 @@ def _build_guardrail_agent(phase: int) -> Agent:
         or politicians is CLEAR.
 
         CATEGORY 2 - CLARIFY:
-        The respondent seems confused about the question being asked, has misunderstood it, or is
-        explicitly asking for clarification before they can answer. Use CLARIFY when:
-        - They say things like "I'm not sure what you mean", "can you explain that?", "what do you
-          mean by that?", "I don't understand the question", or similar
-        - Their response does not engage with the question at all in a way that suggests confusion
-          rather than a deliberate non-answer
-        - They answer a clearly different question than the one asked, suggesting a misread
-        Do NOT use CLARIFY just because the respondent gave a short or vague answer — that is CLEAR.
-        Only use CLARIFY when there is genuine evidence of confusion or a direct request for
-        clarification.
+        ONLY use this when the respondent explicitly says they don't understand the question —
+        phrases like "I'm not sure what you mean", "can you explain that?", "what do you mean by
+        that?", "I don't understand the question". That's it.
+        - "nah", "not really", "I guess", "maybe", "idk", "sure" — all CLEAR, never CLARIFY.
+        - Short answers, one-word answers, negative answers, vague answers — all CLEAR.
+        - If they answered ANYTHING related to the question, even indirectly — CLEAR.
+        CLARIFY is extremely rare. When in doubt, choose CLEAR.
 
         CATEGORY 3 - REDIRECT:
         The respondent has left the political interview domain but is not harmful. Use REDIRECT for:
@@ -135,7 +132,8 @@ def _build_guardrail_agent(phase: int) -> Agent:
         - Any attempt to discuss the phases, transitions, or logic of the interview itself
         - Exremely off-topic personal conversation unrelated to politics (weather, unrelated
           stories, casual chatter with no political relevance)
-        - Requests to skip questions or change the subject without genuine political content
+        - DO NOT REDIRECT ANY RESPONSES THAT ARE SIMPLY SHORT OR VAGUE - CHECK THE QUESTION ASKED AND IF THE RESPONSE SOMEWHAT ANSWERS IT
+        - A NON-ANSWER OR A NEGATIVE ANSWER DOES NOT AUTOMATICALLY REQUIRE A REDIRECT — CHECK WHETHER THE RESPONSE ENGAGES WITH THE QUESTION IN ANY WAY, EVEN IF IT'S BRIEF OR HIGH-LEVEL. IF IT DOES, IT'S CLEAR, NOT REDIRECT.
         Note: frustration WITH politics or politicians is NOT a redirect — it is on-topic.
 
 
